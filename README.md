@@ -5,7 +5,7 @@ Service reliability and monitoring platform built with Java 21 and Spring Boot.
 ServicePulse aims to help developers register services, monitor their availability
 and response times, and review reliability history through a REST API.
 
-**v0.2 adds service registration and listing. The tested `GET /health` endpoint from v0.1 remains available.**
+**v0.3 adds on-demand HTTP checks for registered services. Service registration and listing from v0.2 and the tested `GET /health` endpoint from v0.1 remain available.**
 
 ```http
 GET /health
@@ -75,9 +75,12 @@ on Windows, or `sh mvnw spring-boot:run -Dspring-boot.run.arguments=--server.por
 on macOS/Linux, then visit <http://localhost:8081/health>.
 
 The tests start the Spring application context, including JPA and H2, and use
-MockMvc to verify `/health`, service creation and listing, and invalid requests.
-Registration tests use the real database and roll back their changes for isolation.
-MockMvc exercises Spring's request handling without opening a server port.
+MockMvc to verify `/health`, service creation and listing, invalid requests, and
+on-demand checks. Registration tests use the real database and roll back their
+changes for isolation. Check tests use a separate H2 database and Java's local
+HTTP server on a temporary loopback port, covering success, redirects, errors,
+timeouts, connection failures, and slow response bodies without contacting public
+websites. MockMvc exercises the app's request handling without opening an app port.
 
 ## Service registration (v0.2)
 
@@ -130,6 +133,58 @@ field-specific messages. For example:
 Malformed JSON also returns a clear `400 Bad Request`. Registrations are stored
 in the current process's H2 database and are lost when the application stops.
 
+## On-demand HTTP checks (v0.3)
+
+After registering a service, send `POST /services/{id}/check` with its ID. No
+request body is needed. ServicePulse loads the stored URL and makes an HTTP `GET`
+request to it. For example, to check service 1:
+
+```powershell
+curl.exe -X POST http://localhost:8080/services/1/check
+```
+
+Use `curl` instead of `curl.exe` on macOS/Linux. Example response:
+
+```json
+{
+  "serviceId": 1,
+  "name": "OpenAI",
+  "url": "https://openai.com",
+  "status": "UP",
+  "httpStatus": 200,
+  "responseTimeMs": 143,
+  "checkedAt": "2026-09-28T20:45:00Z"
+}
+```
+
+| Outcome | Check result |
+| --- | --- |
+| Target returns HTTP 200–399 | `UP`, with the target's HTTP status. Redirects are reported without following them. |
+| Target returns HTTP 400–599 | `DOWN`, with the target's HTTP status. |
+| Timeout or connection failure | `DOWN`, with `httpStatus: null`. |
+| Service ID does not exist | API returns `404 Not Found` with no response body. |
+| Service ID is not a number | API returns `400 Bad Request`. |
+
+For an existing service, the API returns `200 OK` with the check result, including
+when the target is `DOWN`. This API status is separate from the target's
+`httpStatus`. `UP` means the initial HTTP response met the rule above; it does not
+verify the response body or the target's dependencies.
+
+`responseTimeMs` measures elapsed HTTP check time using a monotonic clock,
+excluding the database lookup. The response stream is closed as soon as headers
+arrive without reading the body, so a slow or streaming body cannot hold up the check.
+`checkedAt` is the UTC timestamp at the start of the HTTP request.
+
+The defaults in `application.properties` are a 2-second connection timeout
+(`servicepulse.check.connect-timeout`) and a 5-second response timeout
+(`servicepulse.check.request-timeout`). Both must be positive durations. A reusable
+Java HTTP client performs the requests; no new dependencies are required.
+The database lookup finishes before the network call, and check results are only
+returned to the caller. They are not stored.
+
+Each call performs a fresh, manual check. Scheduling, retries, stored history,
+uptime percentages, alerts, deployment tooling, and dashboards remain out of scope.
+
 ## Build an executable JAR
 
 ```powershell
@@ -156,6 +211,12 @@ servicepulse/
     |   |-- java/dev/taufeeqahmed/servicepulse/
     |   |   |-- ServicePulseApplication.java
     |   |   |-- health/HealthController.java
+    |   |   |-- checking/
+    |   |   |   |-- HealthStatus.java
+    |   |   |   |-- HealthCheckResponse.java
+    |   |   |   |-- HttpClientConfiguration.java
+    |   |   |   |-- ServiceCheckService.java
+    |   |   |   `-- ServiceCheckController.java
     |   |   `-- registration/
     |   |       |-- MonitoredService.java
     |   |       |-- MonitoredServiceRepository.java
@@ -169,6 +230,7 @@ servicepulse/
     |   `-- resources/application.properties
     `-- test/java/dev/taufeeqahmed/servicepulse/
         |-- health/HealthControllerTest.java
+        |-- checking/ServiceCheckControllerTest.java
         `-- registration/ServiceRegistrationControllerTest.java
 ```
 
@@ -186,15 +248,20 @@ servicepulse/
 | `registration/HttpUrl.java`, `registration/HttpUrlValidator.java` | Validate HTTP/HTTPS URL syntax without making network requests. |
 | `registration/ServiceRegistrationExceptionHandler.java` | Returns clear validation and malformed-JSON error responses. |
 | `ServiceRegistrationControllerTest.java` | Tests registration, real persistence, listing, and invalid inputs. |
-| `application.properties` | Names the app, configures in-memory H2, creates/drops the local schema, and disables open-in-view. |
+| `checking/HealthStatus.java`, `checking/HealthCheckResponse.java` | Define the UP/DOWN values and check response fields; these are not JPA entities. |
+| `checking/HttpClientConfiguration.java` | Provides a reusable HTTP client with a connection timeout and redirects disabled. |
+| `checking/ServiceCheckService.java` | Loads a registration, checks its URL, measures elapsed time, and handles network failures. |
+| `checking/ServiceCheckController.java` | Exposes `POST /services/{id}/check` and maps missing services to 404. |
+| `ServiceCheckControllerTest.java` | Verifies checks against a controlled local HTTP server and real H2 registrations. |
+| `application.properties` | Configures the app, in-memory H2, schema lifecycle, open-in-view, and check timeouts. |
 | `mvnw`, `mvnw.cmd` | Official Maven wrapper scripts for Unix-like systems and Windows. |
 | `.mvn/wrapper/maven-wrapper.properties` | Pins the Maven version downloaded by the wrapper. |
 | `.gitignore` | Excludes build output, IDE settings, logs, local database files, and environment files. |
 | `.gitattributes` | Keeps appropriate line endings for the wrapper scripts. |
 | `README.md` | Setup, usage, and an explanation of the starter. |
 
-Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health` and
-`registration`. Add future feature packages alongside them when needed.
+Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health`,
+`registration`, and `checking`. Add future feature packages alongside them when needed.
 
 ## Dependencies
 
@@ -210,18 +277,18 @@ Spring Boot manages compatible dependency versions through its Maven parent.
 
 H2 uses the local development username `sa` with an empty password. Its contents
 disappear when the process stops. Hibernate creates the `monitored_services` table
-at startup and drops it on shutdown. There is no H2 browser console or monitoring data.
+at startup and drops it on shutdown. There is no H2 browser console or stored check history.
 
 ## Roadmap
 
-The v0.1 foundation and v0.2 service registration are implemented. Later milestones describe planned work.
+The v0.1 foundation, v0.2 service registration, and v0.3 on-demand checks are implemented. Later milestones describe planned work.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | v0.1 | Java 21 and Spring Boot foundation with a tested `GET /health` endpoint. | Complete (`v0.1.0`) |
-| v0.2 | Service registration API with validation and JPA storage. | Current |
-| v0.3 | On-demand HTTP checks recording status, response time, timestamps, and history. | Planned |
-| v0.4 | Scheduled checks, timeouts, bounded concurrency, and retries. | Planned |
+| v0.2 | Service registration API with validation and JPA storage. | Complete (`v0.2.0`) |
+| v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Current |
+| v0.4 | Stored check history, scheduled checks, bounded concurrency, and retries. | Planned |
 | v0.5 | PostgreSQL persistence, schema migrations, and environment configuration. | Planned |
 | v0.6 | Docker packaging and automated builds and tests with GitHub Actions. | Planned |
 | v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
@@ -230,5 +297,7 @@ The v0.1 foundation and v0.2 service registration are implemented. Later milesto
 
 - [Spring Boot documentation](https://docs.spring.io/spring-boot/)
 - [Spring Boot testing](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
+- [Java 21 HTTP client](https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html)
+- [Java HTTP server for controlled tests](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html)
 - [Maven wrapper](https://maven.apache.org/tools/wrapper/)
 - [Eclipse Temurin JDK downloads](https://adoptium.net/temurin/releases/?version=21)
