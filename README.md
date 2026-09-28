@@ -5,7 +5,7 @@ Service reliability and monitoring platform built with Java 21 and Spring Boot.
 ServicePulse aims to help developers register services, monitor their availability
 and response times, and review reliability history through a REST API.
 
-**v0.4 adds scheduled monitoring for registered services. The v0.3 manual check endpoint, v0.2 registration API, and tested `GET /health` endpoint from v0.1 remain available.**
+**v0.5 adds persistent check history and uptime statistics. Scheduled monitoring from v0.4, the v0.3 manual check endpoint, v0.2 registration API, and tested `GET /health` endpoint from v0.1 remain available.**
 
 ```http
 GET /health
@@ -86,7 +86,13 @@ their fixture URLs. Scheduler tests invoke captured Spring callbacks directly an
 use latches to coordinate concurrent invocations, without long sleeps. They cover
 failure isolation, later-run recovery, configuration, overlap prevention and
 interrupt preservation. A separate integration test checks real H2 registrations
-through the existing HTTP-check service against a local server.
+through the existing HTTP-check service against a local server. Manual and scheduled
+integration tests verify exactly one saved result per check, including DOWN outcomes
+and nullable HTTP status on network failures. History and stats tests use fixed
+timestamps and durations to verify ordering, isolation, aggregates and empty results.
+The `test` profile uses in-memory H2; a restart test uses its own temporary file
+database to verify that registrations and check history survive closing and reopening
+the application. Tests never use the development database under `data/`.
 
 ## Service registration (v0.2)
 
@@ -137,7 +143,7 @@ field-specific messages. For example:
 ```
 
 Malformed JSON also returns a clear `400 Bad Request`. Registrations are stored
-in the current process's H2 database and are lost when the application stops.
+in H2. From v0.5, the development database is file-backed and survives restarts.
 
 ## On-demand HTTP checks (v0.3)
 
@@ -177,7 +183,7 @@ when the target is `DOWN`. This API status is separate from the target's
 verify the response body or the target's dependencies.
 
 `responseTimeMs` measures elapsed HTTP check time using a monotonic clock,
-excluding the database lookup. The response stream is closed as soon as headers
+excluding the database lookup and history write. The response stream is closed as soon as headers
 arrive without reading the body, so a slow or streaming body cannot hold up the check.
 `checkedAt` is the UTC timestamp at the start of the HTTP request.
 
@@ -185,8 +191,9 @@ The defaults in `application.properties` are a 2-second connection timeout
 (`servicepulse.check.connect-timeout`) and a 5-second response timeout
 (`servicepulse.check.request-timeout`). Both must be positive durations. A reusable
 Java HTTP client performs the requests; no new dependencies are required.
-The database lookup finishes before the network call, and check results are only
-returned to the caller. They are not stored.
+The database lookup finishes before the network call. In v0.3 results were only
+returned to the caller; from v0.5 the shared check service also saves each result
+in a short transaction after the network call completes.
 
 Each call performs a fresh, manual check. The scheduled monitoring added in v0.4
 uses the same HTTP-check service and the same UP/DOWN policy.
@@ -197,7 +204,7 @@ Monitoring is enabled by default. After the initial polling interval, the
 scheduler loads all registered services in ID order and checks them one at a time
 using the existing v0.3 `ServiceCheckService`. Each result is written to the app
 log with the service ID, UP/DOWN status, target HTTP status and response time.
-Results are not stored, and there is no monitoring-history API.
+From v0.5, the same shared service also persists each result for history and stats.
 
 Configure these startup properties in `application.properties` or override them
 with Spring Boot command-line arguments/environment variables:
@@ -234,8 +241,98 @@ the error is logged and the guard is released so later scheduled runs can procee
 If the thread is interrupted, the batch stops without checking further services
 and the interrupt flag is preserved. Database transactions do not span HTTP calls.
 
-Persistent history, uptime percentages, incident tracking, retries/backoff,
-alerts, deployment tooling, metrics integrations and dashboards remain future work.
+Each completed manual or scheduled attempt contributes one history row. Concurrent
+manual and scheduled requests are separate attempts and each is counted once.
+If saving fails, the manual request fails; a scheduled batch logs the failure and
+continues with the next service. No retry or second write is attempted. For an
+interrupted HTTP attempt, saving the DOWN result is attempted before restoring the
+interrupt flag. The flag is restored even if saving fails, and the scheduler stops
+the batch as before.
+
+## Persistent check history and uptime (v0.5)
+
+Both check entry points reuse the existing HTTP-check result. A `HealthCheck` row
+stores a generated ID, a required lazy many-to-one reference to `MonitoredService`,
+UP/DOWN status as text, nullable target HTTP status, elapsed milliseconds, and the
+UTC `checkedAt` timestamp. The existing manual response contract is unchanged.
+Disabling scheduled monitoring does not disable manual checks or history recording.
+
+| Endpoint | Success response |
+| --- | --- |
+| `GET /services/{id}/checks` | `200 OK` with all stored checks for that service, newest first, or `[]` for no checks. |
+| `GET /services/{id}/stats` | `200 OK` with aggregate statistics across all stored checks for that service. |
+
+Both endpoints return `404 Not Found` with no body for an unknown service ID,
+matching the manual check endpoint. A nonnumeric ID returns `400 Bad Request`.
+Responses are records rather than JPA entities, and reading them makes no HTTP checks.
+
+For example:
+
+```powershell
+curl.exe http://localhost:8080/services/1/checks
+curl.exe http://localhost:8080/services/1/stats
+```
+
+Use `curl` on macOS/Linux. Example history response:
+
+```json
+[
+  {
+    "id": 1,
+    "serviceId": 1,
+    "status": "UP",
+    "httpStatus": 200,
+    "responseTimeMs": 143,
+    "checkedAt": "2026-09-28T22:30:00Z"
+  }
+]
+```
+
+History is ordered by `checkedAt` descending, then ID descending to resolve equal
+timestamps. There is no pagination or automatic retention/deletion in this milestone.
+An index on `(service_id, checked_at, id)` supports service lookup and ordering.
+The foreign key is required; there is no cascading deletion or reverse history
+collection on `MonitoredService`.
+
+Example stats response:
+
+```json
+{
+  "serviceId": 1,
+  "totalChecks": 100,
+  "upChecks": 97,
+  "downChecks": 3,
+  "uptimePercentage": 97.00,
+  "averageResponseTimeMs": 145.60,
+  "lastCheckedAt": "2026-09-28T22:30:00Z"
+}
+```
+
+- `uptimePercentage = upChecks / totalChecks * 100`. This is the proportion of
+  successful attempts, not a time-weighted availability or SLA measurement. Manual
+  and scheduled checks have equal weight and use the existing UP/DOWN policy.
+- `averageResponseTimeMs` includes every stored attempt, including DOWN responses,
+  connection failures, timeouts and interrupted HTTP requests. It measures the HTTP
+  attempt duration, excluding registration lookup and history persistence.
+- Both metrics use two decimal places with half-up rounding. `lastCheckedAt` is
+  the latest request-start timestamp, returned in UTC (ISO 8601 with `Z`).
+- With zero checks, all counts are `0`; `uptimePercentage`, `averageResponseTimeMs`
+  and `lastCheckedAt` are `null`, meaning no measurement is available.
+
+Counts, average and latest timestamp are calculated together in one database
+aggregate query, without loading history rows into memory. History/stats use read-only
+transactions; each result write has its own short transaction after the HTTP request.
+
+The default URL is `jdbc:h2:file:./data/servicepulse;DB_CLOSE_ON_EXIT=FALSE`.
+Run from the project folder so the relative path consistently identifies the same
+database. H2 creates `data/servicepulse.mv.db`, which is ignored by Git. Registrations
+and checks survive normal shutdown and restart. Hibernate's `ddl-auto=update` creates
+or updates the local development schema without dropping stored data; it is not a
+schema migration system. JDBC timestamps are configured for UTC. Tests use isolated
+databases rather than this file.
+
+Incident tracking, retries/backoff, alerts, PostgreSQL, deployment tooling, metrics
+integrations and dashboards remain future work.
 
 ## Build an executable JAR
 
@@ -269,6 +366,13 @@ servicepulse/
     |   |   |   |-- HttpClientConfiguration.java
     |   |   |   |-- ServiceCheckService.java
     |   |   |   `-- ServiceCheckController.java
+    |   |   |-- history/
+    |   |   |   |-- HealthCheck.java
+    |   |   |   |-- HealthCheckRepository.java
+    |   |   |   |-- CheckHistoryResponse.java
+    |   |   |   |-- ServiceStatsResponse.java
+    |   |   |   |-- CheckHistoryService.java
+    |   |   |   `-- CheckHistoryController.java
     |   |   |-- monitoring/
     |   |   |   |-- MonitoringConfiguration.java
     |   |   |   `-- ServiceMonitoringScheduler.java
@@ -283,8 +387,11 @@ servicepulse/
     |   |       |-- HttpUrlValidator.java
     |   |       `-- ServiceRegistrationExceptionHandler.java
     |   `-- resources/application.properties
+    |-- test/resources/application-test.properties
     `-- test/java/dev/taufeeqahmed/servicepulse/
         |-- health/HealthControllerTest.java
+        |-- history/CheckHistoryControllerTest.java
+        |-- history/CheckHistoryPersistenceTest.java
         |-- checking/ServiceCheckControllerTest.java
         |-- checking/ServiceCheckServiceTest.java
         |-- monitoring/MonitoringConfigurationTest.java
@@ -309,16 +416,24 @@ servicepulse/
 | `ServiceRegistrationControllerTest.java` | Tests registration, real persistence, listing, and invalid inputs. |
 | `checking/HealthStatus.java`, `checking/HealthCheckResponse.java` | Define the UP/DOWN values and check response fields; these are not JPA entities. |
 | `checking/HttpClientConfiguration.java` | Provides a reusable HTTP client with a connection timeout and redirects disabled. |
-| `checking/ServiceCheckService.java` | Loads a registration, checks its URL, measures elapsed time, and handles network failures. |
+| `checking/ServiceCheckService.java` | Loads a registration, performs the HTTP check, and passes one result to history persistence for both manual and scheduled callers. |
 | `checking/ServiceCheckController.java` | Exposes `POST /services/{id}/check` and maps missing services to 404. |
 | `ServiceCheckControllerTest.java` | Verifies checks against a controlled local HTTP server and real H2 registrations. |
 | `monitoring/MonitoringConfiguration.java` | Enables scheduling and registers the monitoring bean only when automatic monitoring is enabled. |
 | `monitoring/ServiceMonitoringScheduler.java` | Runs sequential batches through the existing check service, isolates failures, and prevents overlapping scheduled runs. |
-| `ServiceCheckServiceTest.java` | Verifies that interrupted HTTP checks restore the thread's interrupt flag. |
+| `ServiceCheckServiceTest.java` | Verifies interrupted checks attempt to save their result and preserve the interrupt flag, even when persistence fails. |
 | `MonitoringConfigurationTest.java` | Tests configured intervals, actual scheduled callback registration, and disabling monitoring without waiting for timers. |
 | `ServiceMonitoringSchedulerTest.java` | Tests batch processing, failure recovery, overlap prevention and interruption with controlled mocks/latches. |
-| `ServiceMonitoringIntegrationTest.java` | Runs scheduled-batch logic against real H2 registrations and a controlled local HTTP server. |
-| `application.properties` | Configures the app, in-memory H2, schema lifecycle, open-in-view, HTTP timeouts and scheduled monitoring. |
+| `ServiceMonitoringIntegrationTest.java` | Runs scheduled batches against real H2 registrations and a local server, verifying one saved result per service. |
+| `history/HealthCheck.java` | Check-history entity with a service foreign key and service/timestamp/ID index. |
+| `history/HealthCheckRepository.java` | Ordered history lookup and a single aggregate query for counts, average and latest timestamp. |
+| `history/CheckHistoryResponse.java`, `history/ServiceStatsResponse.java` | JSON history and statistics records without exposing JPA entities. |
+| `history/CheckHistoryService.java` | Writes results, loads history, computes percentages, and distinguishes missing services from empty history. |
+| `history/CheckHistoryController.java` | Exposes `GET /services/{id}/checks` and `GET /services/{id}/stats`. |
+| `CheckHistoryControllerTest.java` | Tests ordering, service isolation, stats, empty history, UTC timestamps and missing/invalid IDs. |
+| `CheckHistoryPersistenceTest.java` | Closes and reopens the app against a temporary H2 file to verify data survives restarts. |
+| `application-test.properties` | Isolates tests with in-memory H2 and a disposable schema. |
+| `application.properties` | Configures file-backed H2, schema updates, UTC JDBC timestamps, HTTP timeouts and scheduled monitoring. |
 | `mvnw`, `mvnw.cmd` | Official Maven wrapper scripts for Unix-like systems and Windows. |
 | `.mvn/wrapper/maven-wrapper.properties` | Pins the Maven version downloaded by the wrapper. |
 | `.gitignore` | Excludes build output, IDE settings, logs, local database files, and environment files. |
@@ -326,7 +441,7 @@ servicepulse/
 | `README.md` | Setup, usage, and an explanation of the starter. |
 
 Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health`,
-`registration`, `checking`, and `monitoring`. Add future feature packages alongside them when needed.
+`registration`, `checking`, `monitoring`, and `history`. Add future feature packages alongside them when needed.
 
 ## Dependencies
 
@@ -335,26 +450,27 @@ Spring Boot manages compatible dependency versions through its Maven parent.
 | Dependency | Why it is here |
 | --- | --- |
 | `spring-boot-starter-webmvc` | Spring Web MVC and embedded Tomcat for serving HTTP requests. This is the Spring MVC web starter for Spring Boot 4. |
-| `spring-boot-starter-data-jpa` | Spring Data repositories and Hibernate for storing registered services. |
+| `spring-boot-starter-data-jpa` | Spring Data repositories and Hibernate for storing registered services and check history. |
 | `spring-boot-starter-validation` | Jakarta Bean Validation for required fields, length limits, and HTTP/HTTPS URL validation. |
-| `h2` (runtime) | An in-memory development database requiring no separate database installation. |
+| `h2` (runtime) | An embedded database with file-backed development storage and isolated test databases. |
 | `spring-boot-starter-webmvc-test` (test) | Spring MVC testing support and Spring Boot's test starter, including JUnit Jupiter and MockMvc. |
 
-H2 uses the local development username `sa` with an empty password. Its contents
-disappear when the process stops. Hibernate creates the `monitored_services` table
-at startup and drops it on shutdown. There is no H2 browser console or stored check history.
+H2 uses the local development username `sa` with an empty password. Hibernate
+maintains the `monitored_services` and `health_checks` tables. The development
+database now survives restarts; v0.1-v0.4 used an in-memory database. No additional
+dependencies or H2 browser console are introduced in v0.5.
 
 ## Roadmap
 
-The v0.1 foundation, v0.2 registration, v0.3 manual checks and v0.4 scheduled monitoring are implemented. Later milestones describe planned work.
+The v0.1-v0.4 releases are complete. v0.5 adds persisted history and uptime statistics; later milestones remain planned.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | v0.1 | Java 21 and Spring Boot foundation with a tested `GET /health` endpoint. | Complete (`v0.1.0`) |
 | v0.2 | Service registration API with validation and JPA storage. | Complete (`v0.2.0`) |
 | v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Complete (`v0.3.0`) |
-| v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Current |
-| v0.5 | PostgreSQL persistence, schema migrations, and environment configuration. | Planned |
+| v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Complete (`v0.4.0`) |
+| v0.5 | Persistent check history in H2, history API and uptime statistics for manual and scheduled checks. | Current |
 | v0.6 | Docker packaging and automated builds and tests with GitHub Actions. | Planned |
 | v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
 
@@ -363,6 +479,9 @@ The v0.1 foundation, v0.2 registration, v0.3 manual checks and v0.4 scheduled mo
 - [Spring Boot documentation](https://docs.spring.io/spring-boot/)
 - [Spring Boot testing](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
 - [Spring scheduling](https://docs.spring.io/spring-framework/reference/integration/scheduling.html)
+- [Spring Data JPA projections](https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html)
+- [Spring Data JPA transactions](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html)
+- [H2 database storage](https://h2database.com/html/features.html)
 - [Java 21 HTTP client](https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html)
 - [Java HTTP server for controlled tests](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html)
 - [Maven wrapper](https://maven.apache.org/tools/wrapper/)

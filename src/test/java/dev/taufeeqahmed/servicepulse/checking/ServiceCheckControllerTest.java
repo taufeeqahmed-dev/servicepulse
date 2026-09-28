@@ -3,6 +3,7 @@ package dev.taufeeqahmed.servicepulse.checking;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -12,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -24,16 +26,19 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+@ActiveProfiles("test")
 @SpringBootTest(properties = {
         "servicepulse.monitoring.enabled=false",
         "servicepulse.check.connect-timeout=300ms",
@@ -53,11 +58,15 @@ class ServiceCheckControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private HealthCheckRepository checks;
+
     private HttpServer server;
     private ExecutorService executor;
 
     @BeforeEach
     void setUp() throws IOException {
+        checks.deleteAll();
         repository.deleteAll();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -72,6 +81,7 @@ class ServiceCheckControllerTest {
         }
         executor.shutdownNow();
         executor.awaitTermination(5, TimeUnit.SECONDS);
+        checks.deleteAll();
         repository.deleteAll();
     }
 
@@ -195,6 +205,7 @@ class ServiceCheckControllerTest {
     void returnsNotFoundForUnknownService() throws Exception {
         mockMvc.perform(post("/services/{id}/check", Long.MAX_VALUE))
                 .andExpect(status().isNotFound());
+        assertThat(checks.count()).isZero();
     }
 
     @Test
@@ -230,9 +241,21 @@ class ServiceCheckControllerTest {
     }
 
     private ResultActions check(MonitoredService registered) throws Exception {
-        return mockMvc.perform(post("/services/{id}/check", registered.getId()))
+        long countBefore = checks.count();
+        var result = mockMvc.perform(post("/services/{id}/check", registered.getId()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+        var response = objectMapper.readValue(result.andReturn().getResponse().getContentAsString(),
+                HealthCheckResponse.class);
+        assertThat(checks.count()).isEqualTo(countBefore + 1);
+        var saved = checks.findByMonitoredService_IdOrderByCheckedAtDescIdDesc(registered.getId()).getFirst();
+        assertThat(saved.getId()).isPositive();
+        assertThat(saved.getMonitoredService().getId()).isEqualTo(registered.getId());
+        assertThat(saved.getStatus()).isEqualTo(response.status());
+        assertThat(saved.getHttpStatus()).isEqualTo(response.httpStatus());
+        assertThat(saved.getResponseTimeMs()).isEqualTo(response.responseTimeMs());
+        assertThat(saved.getCheckedAt()).isCloseTo(response.checkedAt(), within(1, ChronoUnit.MICROS));
+        return result;
     }
 
     private static void respond(HttpExchange exchange, int status) throws IOException {
