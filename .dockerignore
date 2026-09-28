@@ -1,0 +1,17 @@
+# Send only the inputs required to build the JAR.
+**
+!pom.xml
+!mvnw
+!.mvn/
+!.mvn/wrapper/
+!.mvn/wrapper/maven-wrapper.properties
+!src/
+!src/**
+
+# Exclude local data and environment files even if placed under src/.
+**/*.db
+**/*.mv.db
+**/*.trace.db
+**/*.log
+**/.env
+**/.env.*

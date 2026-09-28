@@ -5,7 +5,7 @@ Service reliability and monitoring platform built with Java 21 and Spring Boot.
 ServicePulse aims to help developers register services, monitor their availability
 and response times, and review reliability history through a REST API.
 
-**v0.5 adds persistent check history and uptime statistics. Scheduled monitoring from v0.4, the v0.3 manual check endpoint, v0.2 registration API, and tested `GET /health` endpoint from v0.1 remain available.**
+**v0.6 adds Docker packaging and GitHub Actions CI. Persistent history and uptime statistics from v0.5, scheduled monitoring from v0.4, manual checks from v0.3, registration from v0.2, and the tested `GET /health` endpoint from v0.1 remain available.**
 
 ```http
 GET /health
@@ -21,6 +21,9 @@ not check any external service or report database health.
   use, point `JAVA_HOME` at your JDK 21 folder and put its `bin` folder on `PATH`.
 - Internet access for the first build, which downloads Maven and dependencies.
 - Maven is supplied by the checked-in wrapper; a separate installation is optional.
+- For Docker usage, use a current Docker Engine or Docker Desktop with Linux
+  containers. Docker builds supply their own Java and Maven; a host JDK is only
+  needed for running Maven or the JAR directly.
 
 Check the Java version with `java -version`. The build also reports its Java
 installation when you run `.\mvnw.cmd -version` on Windows or `sh mvnw -version`
@@ -331,7 +334,7 @@ or updates the local development schema without dropping stored data; it is not 
 schema migration system. JDBC timestamps are configured for UTC. Tests use isolated
 databases rather than this file.
 
-Incident tracking, retries/backoff, alerts, PostgreSQL, deployment tooling, metrics
+Incident tracking, retries/backoff, alerts, PostgreSQL, cloud deployment, metrics
 integrations and dashboards remain future work.
 
 ## Build an executable JAR
@@ -344,10 +347,135 @@ java -jar target/servicepulse-0.0.1-SNAPSHOT.jar
 On macOS/Linux, replace `.\mvnw.cmd` with `sh mvnw`. `clean verify` runs the test
 and builds the executable JAR. Generated files live in the ignored `target/` folder.
 
+## Docker (v0.6)
+
+Run these commands from the project folder. The single-line Docker commands work
+in both Windows PowerShell and standard POSIX shells:
+
+```sh
+docker build -t servicepulse:dev .
+docker volume create servicepulse-data
+docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:dev
+docker logs servicepulse
+```
+
+Wait for the startup log, then check `http://localhost:8080/health`:
+
+```powershell
+curl.exe -i http://localhost:8080/health
+```
+
+Use `curl -i` on macOS/Linux. Expect `200 OK` with body `UP`. Port 8080 in the
+container is mapped to port 8080 on the host's loopback interface. If the host
+port is busy, use `-p 127.0.0.1:8081:8080` and visit port 8081; the application
+inside the container still uses port 8080.
+
+The Dockerfile uses two stages: Eclipse Temurin's Java 21 JDK builds the executable
+JAR with the checked-in Maven wrapper, then a smaller Java 21 JRE image runs it.
+The runtime image contains the JAR without Maven, source files or build caches.
+It runs as UID/GID `10001:10001`, with `/app/data` writable by that user. The
+exec-form entry point sends stop signals directly to Java.
+
+The build uses a BuildKit Maven cache for repeated builds on the same builder.
+Image packaging skips test execution because CI runs `clean verify` first; for
+local verification run `.\mvnw.cmd clean verify` (or `./mvnw clean verify`) before
+building the image. Base images are pinned by digest and workflow actions by
+commit SHA; update those pins deliberately when taking upstream updates.
+The `.dockerignore` allowlist sends only the POM, wrapper and source tree, excluding
+local databases, environment files, Git metadata, IDE settings and build output.
+
+### Persistent data and configuration
+
+The named volume is mounted at **`/app/data`**. H2 stores
+`/app/data/servicepulse.mv.db` there, including registrations and check history.
+Reuse the same volume when restarting or replacing the container. Removing the
+container does not delete this named volume. Without the mount, data is stored
+in the container's writable layer and is lost when that container is removed.
+
+The image creates the data directory with the non-root user's ownership, which
+Docker carries into a new empty named volume. For an existing volume or a bind
+mount, ensure the directory is writable by UID/GID `10001:10001`. Run only one
+ServicePulse container against a given embedded H2 database at a time.
+
+Pass overrides with `docker run -e NAME=value` before the image name:
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `SPRING_DATASOURCE_URL` | `jdbc:h2:file:/app/data/servicepulse;DB_CLOSE_ON_EXIT=FALSE` in Docker | Override the database file path/URL. Mount its parent directory and ensure it is writable. |
+| `SERVICEPULSE_MONITORING_ENABLED` | `true` | Set to `false` to disable scheduled checks; manual checks and history remain available. |
+| `SERVICEPULSE_MONITORING_POLLINTERVAL` | `30s` | Initial delay and delay between completed batches. |
+| `SERVICEPULSE_CHECK_CONNECTTIMEOUT` | `2s` | HTTP connection timeout. |
+| `SERVICEPULSE_CHECK_REQUESTTIMEOUT` | `5s` | HTTP response timeout. |
+| `SERVER_PORT` | `8080` | Internal application port; adjust the container side of the port mapping if changed. |
+
+For example, add `-e SERVICEPULSE_MONITORING_POLLINTERVAL=10s` to check more often.
+To use a different database name on the same volume, add
+`-e "SPRING_DATASOURCE_URL=jdbc:h2:file:/app/data/custom;DB_CLOSE_ON_EXIT=FALSE"`.
+The entire environment argument is quoted so the semicolon works in both shells.
+Local Maven/IDE runs still default to `./data/servicepulse` unless explicitly
+overridden. No local environment files or database files are copied into the image.
+
+### Check behaviour and volume persistence
+
+This PowerShell example registers the container's own fixed health endpoint, so
+manual and scheduled checks can be exercised without an external website:
+
+```powershell
+$registered = Invoke-RestMethod -Method Post -Uri http://localhost:8080/services -ContentType 'application/json' -Body '{"name":"Container health","url":"http://127.0.0.1:8080/health"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/services/$($registered.id)/check"
+Invoke-RestMethod -Uri "http://localhost:8080/services/$($registered.id)/checks"
+Invoke-RestMethod -Uri "http://localhost:8080/services/$($registered.id)/stats"
+```
+
+The manual result should be UP with target HTTP status 200. After the configured
+polling interval, scheduled-check log entries appear and the stored check count
+increases without more manual requests. `127.0.0.1` in a registered URL refers to
+the container itself. To monitor an app running on the host with Docker Desktop,
+use `host.docker.internal` instead.
+
+Restart and, once startup completes, read the same service/history again:
+
+```sh
+docker restart -t 30 servicepulse
+```
+
+For a stronger check, replace the container while retaining the volume:
+
+```sh
+docker stop -t 30 servicepulse
+docker rm servicepulse
+docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:dev
+```
+
+Existing registrations and checks should still be present. Scheduled checks resume
+after startup, so history may grow; earlier records should remain. Use
+`docker stop -t 30 servicepulse` when finished. Keep the named volume to retain data.
+
+## Continuous integration (v0.6)
+
+The workflow at `.github/workflows/ci.yml` runs on pushes and pull requests. One
+Ubuntu 24.04 job checks out the code with read-only repository permission, sets up
+Temurin Java 21, restores Maven dependencies, and runs:
+
+```sh
+./mvnw --batch-mode --no-transfer-progress clean verify
+docker build --tag servicepulse:ci .
+```
+
+The Docker build is a later step and runs only when verification succeeds. A test
+or image-build failure fails the job. The Maven cache key covers the POM and wrapper
+configuration; Docker's builder cache is separate. New runs cancel older runs for
+the same Git ref, and the job has a 20-minute timeout. The image stays on the runner;
+CI does not log into or publish to a container registry. It builds the image but
+does not run the container smoke checks above. No secrets are required.
+
 ## Files and packages
 
 ```text
 servicepulse/
+|-- .dockerignore
+|-- .github/workflows/ci.yml
+|-- Dockerfile
 |-- .gitattributes
 |-- .gitignore
 |-- .mvn/wrapper/maven-wrapper.properties
@@ -402,6 +530,9 @@ servicepulse/
 
 | File | Purpose |
 | --- | --- |
+| `Dockerfile` | Builds the JAR with Java 21 and runs it on a non-root Java 21 JRE image with writable volume storage. |
+| `.dockerignore` | Limits Docker build inputs and excludes local data, environment files and generated output. |
+| `.github/workflows/ci.yml` | Runs Java 21 verification and then builds the Docker image on pushes and pull requests. |
 | `pom.xml` | Pins Spring Boot 4.1.1, targets Java 21, declares dependencies, and configures executable JAR packaging. |
 | `ServicePulseApplication.java` | Starts Spring Boot. Its root package lets Spring discover components in subpackages. |
 | `health/HealthController.java` | Maps `GET /health` to the plain text response `UP`. |
@@ -462,7 +593,7 @@ dependencies or H2 browser console are introduced in v0.5.
 
 ## Roadmap
 
-The v0.1-v0.4 releases are complete. v0.5 adds persisted history and uptime statistics; later milestones remain planned.
+The v0.1-v0.5 releases are complete. v0.6 adds Docker packaging and CI; v0.7 remains planned.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -470,8 +601,8 @@ The v0.1-v0.4 releases are complete. v0.5 adds persisted history and uptime stat
 | v0.2 | Service registration API with validation and JPA storage. | Complete (`v0.2.0`) |
 | v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Complete (`v0.3.0`) |
 | v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Complete (`v0.4.0`) |
-| v0.5 | Persistent check history in H2, history API and uptime statistics for manual and scheduled checks. | Current |
-| v0.6 | Docker packaging and automated builds and tests with GitHub Actions. | Planned |
+| v0.5 | Persistent check history in H2, history API and uptime statistics for manual and scheduled checks. | Complete (`v0.5.0`) |
+| v0.6 | Docker packaging, persistent H2 volume support and automated verification/image builds with GitHub Actions. | Current |
 | v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
 
 ## Official references
@@ -485,4 +616,8 @@ The v0.1-v0.4 releases are complete. v0.5 adds persisted history and uptime stat
 - [Java 21 HTTP client](https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html)
 - [Java HTTP server for controlled tests](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html)
 - [Maven wrapper](https://maven.apache.org/tools/wrapper/)
+- [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
+- [Docker volumes](https://docs.docker.com/engine/storage/volumes/)
+- [Eclipse Temurin container images](https://github.com/adoptium/containers)
+- [GitHub Actions Java setup and caching](https://github.com/actions/setup-java)
 - [Eclipse Temurin JDK downloads](https://adoptium.net/temurin/releases/?version=21)
