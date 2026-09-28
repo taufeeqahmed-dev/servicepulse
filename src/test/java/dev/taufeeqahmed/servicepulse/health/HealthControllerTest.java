@@ -1,4 +1,4 @@
-package com.example.servicepulse.health;
+package dev.taufeeqahmed.servicepulse.health;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;

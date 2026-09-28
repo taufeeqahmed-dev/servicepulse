@@ -1,4 +1,4 @@
-package com.example.servicepulse;
+package dev.taufeeqahmed.servicepulse;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

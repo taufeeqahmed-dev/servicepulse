@@ -1,7 +1,11 @@
 # ServicePulse
 
-A small Java 21 and Spring Boot portfolio project, ready to grow into a service
-monitoring application. This starter has one application endpoint:
+Service reliability and monitoring platform built with Java 21 and Spring Boot.
+
+ServicePulse aims to help developers register services, monitor their availability
+and response times, and review reliability history through a REST API.
+
+**v0.1 currently only provides a tested `GET /health` endpoint.**
 
 ```http
 GET /health
@@ -24,10 +28,17 @@ on macOS/Linux.
 
 ## Open in your IDE
 
-1. Extract the ZIP if needed, then open the `servicepulse` folder or its `pom.xml`.
+Clone the repository:
+
+```sh
+git clone https://github.com/taufeeqahmed-dev/servicepulse.git
+cd servicepulse
+```
+
+1. Open the cloned `servicepulse` project folder or its `pom.xml` in your IDE.
 2. Import it as a Maven project and let the dependencies finish downloading.
 3. Select JDK 21 for both the project and Maven runner.
-4. Run `com.example.servicepulse.ServicePulseApplication`.
+4. Run `dev.taufeeqahmed.servicepulse.ServicePulseApplication`.
 
 IntelliJ IDEA, Eclipse, and VS Code with Java support can import this Maven project.
 The commands below should be run from the folder containing `pom.xml`.
@@ -90,11 +101,11 @@ servicepulse/
 |-- README.md
 `-- src/
     |-- main/
-    |   |-- java/com/example/servicepulse/
+    |   |-- java/dev/taufeeqahmed/servicepulse/
     |   |   |-- ServicePulseApplication.java
     |   |   `-- health/HealthController.java
     |   `-- resources/application.properties
-    `-- test/java/com/example/servicepulse/health/HealthControllerTest.java
+    `-- test/java/dev/taufeeqahmed/servicepulse/health/HealthControllerTest.java
 ```
 
 | File | Purpose |
@@ -110,7 +121,7 @@ servicepulse/
 | `.gitattributes` | Keeps appropriate line endings for the wrapper scripts. |
 | `README.md` | Setup, usage, and an explanation of the starter. |
 
-Code is grouped by feature under `com.example.servicepulse`, starting with
+Code is grouped by feature under `dev.taufeeqahmed.servicepulse`, starting with
 `health`. Add future feature packages alongside it when needed.
 
 ## Dependencies
@@ -128,14 +139,19 @@ H2 uses the local development username `sa` with an empty password. Its contents
 disappear when the process stops. This starter has no H2 browser console, tables,
 or saved monitoring data.
 
-## Scope and next step
+## Roadmap
 
-This first milestone deliberately ends at a running application and a tested
-`/health` endpoint. It does not implement service registration, outgoing HTTP
-checks, history, a scheduler, retries, alerts, a dashboard, Docker, or CI.
+Only v0.1 is implemented. Later milestones describe planned work.
 
-After running the test and reading the controller, define the fields and API
-contract for registering one service before adding the next feature.
+| Milestone | Scope | Status |
+| --- | --- | --- |
+| v0.1 | Java 21 and Spring Boot foundation with a tested `GET /health` endpoint. | Current |
+| v0.2 | Service registration API with validation and JPA storage. | Planned |
+| v0.3 | On-demand HTTP checks recording status, response time, timestamps, and history. | Planned |
+| v0.4 | Scheduled checks, timeouts, bounded concurrency, and retries. | Planned |
+| v0.5 | PostgreSQL persistence, schema migrations, and environment configuration. | Planned |
+| v0.6 | Docker packaging and automated builds and tests with GitHub Actions. | Planned |
+| v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
 
 ## Official references
 

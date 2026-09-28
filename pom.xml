@@ -11,11 +11,11 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.example</groupId>
+    <groupId>dev.taufeeqahmed</groupId>
     <artifactId>servicepulse</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>ServicePulse</name>
-    <description>A Java and Spring Boot portfolio project starter</description>
+    <description>Service reliability and monitoring platform built with Java 21 and Spring Boot.</description>
 
     <properties>
         <java.version>21</java.version>
