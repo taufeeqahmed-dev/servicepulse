@@ -1,0 +1,30 @@
+# Maven build output
+/target/
+*.class
+
+# IDE settings
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
+/nbproject/private/
+
+# Local database files, logs, and environment settings
+*.mv.db
+*.trace.db
+*.log
+.env
+.env.*
+!.env.example
+
+# Operating system files
+.DS_Store
+Thumbs.db
