@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import dev.taufeeqahmed.servicepulse.history.CheckHistoryService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,15 +22,18 @@ public class ServiceCheckService {
 
     private final MonitoredServiceRepository repository;
     private final HttpClient httpClient;
+    private final CheckHistoryService history;
     private final Duration requestTimeout;
 
     public ServiceCheckService(MonitoredServiceRepository repository, HttpClient httpClient,
+            CheckHistoryService history,
             @Value("${servicepulse.check.request-timeout}") Duration requestTimeout) {
         if (requestTimeout.isZero() || requestTimeout.isNegative()) {
             throw new IllegalArgumentException("Request timeout must be positive.");
         }
         this.repository = repository;
         this.httpClient = httpClient;
+        this.history = history;
         this.requestTimeout = requestTimeout;
     }
 
@@ -46,6 +50,7 @@ public class ServiceCheckService {
         Instant checkedAt = Instant.now();
         long startedAt = System.nanoTime();
         Integer httpStatus = null;
+        boolean interrupted = false;
 
         try {
             HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -56,13 +61,23 @@ public class ServiceCheckService {
         } catch (IOException exception) {
             // Network failures before headers leave the HTTP status unset, producing DOWN.
         } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
+            interrupted = true;
         }
 
         long responseTimeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
         HealthStatus status = httpStatus != null && httpStatus >= 200 && httpStatus < 400
                 ? HealthStatus.UP : HealthStatus.DOWN;
-        return new HealthCheckResponse(service.getId(), service.getName(), service.getUrl(),
+        var result = new HealthCheckResponse(service.getId(), service.getName(), service.getUrl(),
                 status, httpStatus, responseTimeMs, checkedAt);
+        try {
+            // Both entry points write once, in a short transaction after the HTTP request.
+            history.record(service, result);
+            return result;
+        } finally {
+            // Restore cancellation after recording the interrupted attempt, even if saving fails.
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 }
