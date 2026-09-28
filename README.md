@@ -5,7 +5,7 @@ Service reliability and monitoring platform built with Java 21 and Spring Boot.
 ServicePulse aims to help developers register services, monitor their availability
 and response times, and review reliability history through a REST API.
 
-**v0.3 adds on-demand HTTP checks for registered services. Service registration and listing from v0.2 and the tested `GET /health` endpoint from v0.1 remain available.**
+**v0.4 adds scheduled monitoring for registered services. The v0.3 manual check endpoint, v0.2 registration API, and tested `GET /health` endpoint from v0.1 remain available.**
 
 ```http
 GET /health
@@ -81,6 +81,12 @@ changes for isolation. Check tests use a separate H2 database and Java's local
 HTTP server on a temporary loopback port, covering success, redirects, errors,
 timeouts, connection failures, and slow response bodies without contacting public
 websites. MockMvc exercises the app's request handling without opening an app port.
+These API tests disable scheduled monitoring so background work cannot contact
+their fixture URLs. Scheduler tests invoke captured Spring callbacks directly and
+use latches to coordinate concurrent invocations, without long sleeps. They cover
+failure isolation, later-run recovery, configuration, overlap prevention and
+interrupt preservation. A separate integration test checks real H2 registrations
+through the existing HTTP-check service against a local server.
 
 ## Service registration (v0.2)
 
@@ -182,8 +188,54 @@ Java HTTP client performs the requests; no new dependencies are required.
 The database lookup finishes before the network call, and check results are only
 returned to the caller. They are not stored.
 
-Each call performs a fresh, manual check. Scheduling, retries, stored history,
-uptime percentages, alerts, deployment tooling, and dashboards remain out of scope.
+Each call performs a fresh, manual check. The scheduled monitoring added in v0.4
+uses the same HTTP-check service and the same UP/DOWN policy.
+
+## Scheduled monitoring (v0.4)
+
+Monitoring is enabled by default. After the initial polling interval, the
+scheduler loads all registered services in ID order and checks them one at a time
+using the existing v0.3 `ServiceCheckService`. Each result is written to the app
+log with the service ID, UP/DOWN status, target HTTP status and response time.
+Results are not stored, and there is no monitoring-history API.
+
+Configure these startup properties in `application.properties` or override them
+with Spring Boot command-line arguments/environment variables:
+
+| Property | Development default | Meaning |
+| --- | --- | --- |
+| `servicepulse.monitoring.enabled` | `true` | Set to `false` to disable automatic checks. The manual endpoint remains available. |
+| `servicepulse.monitoring.poll-interval` | `30s` | Positive fixed delay after a batch finishes, also used before the first batch. Duration formats such as `10s` or `PT1M` are supported. |
+
+For example, to disable monitoring when running the packaged app:
+
+```powershell
+java -jar target/servicepulse-0.0.1-SNAPSHOT.jar --servicepulse.monitoring.enabled=false
+```
+
+Restart the app after changing these settings. HTTP connection and response
+timeouts remain controlled by the existing `servicepulse.check.*` properties;
+scheduled checks use exactly the same timeouts as manual checks.
+
+A fixed delay starts after the previous batch completes, rather than starting a
+new batch while checks are still running. An atomic run guard also rejects
+concurrent invocations of the scheduler. This prevents overlapping scheduled
+checks in one app instance without a worker pool or per-service locks. Since
+services are checked sequentially, slow services extend the batch duration and
+the time between checks of an individual service.
+
+The manual `POST /services/{id}/check` endpoint is independent of this guard and
+keeps its existing response contract. Manual and scheduled checks can therefore
+run concurrently; the guard only coordinates scheduled batches in this instance.
+
+A DOWN result or unexpected exception from one service does not prevent checks
+of the remaining services. If loading registrations or running a batch fails,
+the error is logged and the guard is released so later scheduled runs can proceed.
+If the thread is interrupted, the batch stops without checking further services
+and the interrupt flag is preserved. Database transactions do not span HTTP calls.
+
+Persistent history, uptime percentages, incident tracking, retries/backoff,
+alerts, deployment tooling, metrics integrations and dashboards remain future work.
 
 ## Build an executable JAR
 
@@ -217,6 +269,9 @@ servicepulse/
     |   |   |   |-- HttpClientConfiguration.java
     |   |   |   |-- ServiceCheckService.java
     |   |   |   `-- ServiceCheckController.java
+    |   |   |-- monitoring/
+    |   |   |   |-- MonitoringConfiguration.java
+    |   |   |   `-- ServiceMonitoringScheduler.java
     |   |   `-- registration/
     |   |       |-- MonitoredService.java
     |   |       |-- MonitoredServiceRepository.java
@@ -231,6 +286,10 @@ servicepulse/
     `-- test/java/dev/taufeeqahmed/servicepulse/
         |-- health/HealthControllerTest.java
         |-- checking/ServiceCheckControllerTest.java
+        |-- checking/ServiceCheckServiceTest.java
+        |-- monitoring/MonitoringConfigurationTest.java
+        |-- monitoring/ServiceMonitoringSchedulerTest.java
+        |-- monitoring/ServiceMonitoringIntegrationTest.java
         `-- registration/ServiceRegistrationControllerTest.java
 ```
 
@@ -253,7 +312,13 @@ servicepulse/
 | `checking/ServiceCheckService.java` | Loads a registration, checks its URL, measures elapsed time, and handles network failures. |
 | `checking/ServiceCheckController.java` | Exposes `POST /services/{id}/check` and maps missing services to 404. |
 | `ServiceCheckControllerTest.java` | Verifies checks against a controlled local HTTP server and real H2 registrations. |
-| `application.properties` | Configures the app, in-memory H2, schema lifecycle, open-in-view, and check timeouts. |
+| `monitoring/MonitoringConfiguration.java` | Enables scheduling and registers the monitoring bean only when automatic monitoring is enabled. |
+| `monitoring/ServiceMonitoringScheduler.java` | Runs sequential batches through the existing check service, isolates failures, and prevents overlapping scheduled runs. |
+| `ServiceCheckServiceTest.java` | Verifies that interrupted HTTP checks restore the thread's interrupt flag. |
+| `MonitoringConfigurationTest.java` | Tests configured intervals, actual scheduled callback registration, and disabling monitoring without waiting for timers. |
+| `ServiceMonitoringSchedulerTest.java` | Tests batch processing, failure recovery, overlap prevention and interruption with controlled mocks/latches. |
+| `ServiceMonitoringIntegrationTest.java` | Runs scheduled-batch logic against real H2 registrations and a controlled local HTTP server. |
+| `application.properties` | Configures the app, in-memory H2, schema lifecycle, open-in-view, HTTP timeouts and scheduled monitoring. |
 | `mvnw`, `mvnw.cmd` | Official Maven wrapper scripts for Unix-like systems and Windows. |
 | `.mvn/wrapper/maven-wrapper.properties` | Pins the Maven version downloaded by the wrapper. |
 | `.gitignore` | Excludes build output, IDE settings, logs, local database files, and environment files. |
@@ -261,7 +326,7 @@ servicepulse/
 | `README.md` | Setup, usage, and an explanation of the starter. |
 
 Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health`,
-`registration`, and `checking`. Add future feature packages alongside them when needed.
+`registration`, `checking`, and `monitoring`. Add future feature packages alongside them when needed.
 
 ## Dependencies
 
@@ -281,14 +346,14 @@ at startup and drops it on shutdown. There is no H2 browser console or stored ch
 
 ## Roadmap
 
-The v0.1 foundation, v0.2 service registration, and v0.3 on-demand checks are implemented. Later milestones describe planned work.
+The v0.1 foundation, v0.2 registration, v0.3 manual checks and v0.4 scheduled monitoring are implemented. Later milestones describe planned work.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | v0.1 | Java 21 and Spring Boot foundation with a tested `GET /health` endpoint. | Complete (`v0.1.0`) |
 | v0.2 | Service registration API with validation and JPA storage. | Complete (`v0.2.0`) |
-| v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Current |
-| v0.4 | Stored check history, scheduled checks, bounded concurrency, and retries. | Planned |
+| v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Complete (`v0.3.0`) |
+| v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Current |
 | v0.5 | PostgreSQL persistence, schema migrations, and environment configuration. | Planned |
 | v0.6 | Docker packaging and automated builds and tests with GitHub Actions. | Planned |
 | v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
@@ -297,6 +362,7 @@ The v0.1 foundation, v0.2 service registration, and v0.3 on-demand checks are im
 
 - [Spring Boot documentation](https://docs.spring.io/spring-boot/)
 - [Spring Boot testing](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
+- [Spring scheduling](https://docs.spring.io/spring-framework/reference/integration/scheduling.html)
 - [Java 21 HTTP client](https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html)
 - [Java HTTP server for controlled tests](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html)
 - [Maven wrapper](https://maven.apache.org/tools/wrapper/)

@@ -35,6 +35,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
+        "servicepulse.monitoring.enabled=false",
         "servicepulse.check.connect-timeout=300ms",
         "servicepulse.check.request-timeout=1s",
         "spring.datasource.url=jdbc:h2:mem:servicepulse-check-tests;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE"
