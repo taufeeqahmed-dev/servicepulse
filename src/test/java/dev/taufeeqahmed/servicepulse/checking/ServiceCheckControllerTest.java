@@ -207,11 +207,11 @@ class ServiceCheckControllerTest {
 
     @Test
     void returnsNotFoundForUnknownService() throws Exception {
-        double countBefore = metrics.get("servicepulse.checks").counter().count();
+        double countBefore = completedChecks();
         mockMvc.perform(post("/services/{id}/check", Long.MAX_VALUE))
                 .andExpect(status().isNotFound());
         assertThat(checks.count()).isZero();
-        assertThat(metrics.get("servicepulse.checks").counter().count()).isEqualTo(countBefore);
+        assertThat(completedChecks()).isEqualTo(countBefore);
     }
 
     @Test
@@ -248,9 +248,9 @@ class ServiceCheckControllerTest {
 
     private ResultActions check(MonitoredService registered) throws Exception {
         long countBefore = checks.count();
-        double checksBefore = metrics.get("servicepulse.checks").counter().count();
-        double upBefore = metrics.get("servicepulse.checks.up").counter().count();
-        double downBefore = metrics.get("servicepulse.checks.down").counter().count();
+        double checksBefore = completedChecks();
+        double upBefore = metrics.get("servicepulse.checks").tag("status", "UP").counter().count();
+        double downBefore = metrics.get("servicepulse.checks").tag("status", "DOWN").counter().count();
         var duration = metrics.get("servicepulse.check.duration").timer();
         long durationsBefore = duration.count();
         double timeBefore = duration.totalTime(TimeUnit.MILLISECONDS);
@@ -267,15 +267,20 @@ class ServiceCheckControllerTest {
         assertThat(saved.getHttpStatus()).isEqualTo(response.httpStatus());
         assertThat(saved.getResponseTimeMs()).isEqualTo(response.responseTimeMs());
         assertThat(saved.getCheckedAt()).isCloseTo(response.checkedAt(), within(1, ChronoUnit.MICROS));
-        assertThat(metrics.get("servicepulse.checks").counter().count()).isEqualTo(checksBefore + 1);
-        assertThat(metrics.get("servicepulse.checks.up").counter().count())
+        assertThat(completedChecks()).isEqualTo(checksBefore + 1);
+        assertThat(metrics.get("servicepulse.checks").tag("status", "UP").counter().count())
                 .isEqualTo(upBefore + (response.status() == HealthStatus.UP ? 1 : 0));
-        assertThat(metrics.get("servicepulse.checks.down").counter().count())
+        assertThat(metrics.get("servicepulse.checks").tag("status", "DOWN").counter().count())
                 .isEqualTo(downBefore + (response.status() == HealthStatus.DOWN ? 1 : 0));
         assertThat(duration.count()).isEqualTo(durationsBefore + 1);
         assertThat(duration.totalTime(TimeUnit.MILLISECONDS))
                 .isCloseTo(timeBefore + response.responseTimeMs(), within(0.001));
         return result;
+    }
+
+    private double completedChecks() {
+        return metrics.get("servicepulse.checks").tag("status", "UP").counter().count()
+                + metrics.get("servicepulse.checks").tag("status", "DOWN").counter().count();
     }
 
     private static void respond(HttpExchange exchange, int status) throws IOException {

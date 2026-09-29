@@ -376,28 +376,44 @@ Counters gain `_total`; timer durations are exported in seconds.
 
 | Micrometer name | Prometheus series | Meaning |
 | --- | --- | --- |
-| `servicepulse.checks` | `servicepulse_checks_total` | Completed HTTP check attempts with an UP or DOWN result. |
-| `servicepulse.checks.up` | `servicepulse_checks_up_total` | UP results: HTTP 2xx or 3xx, using the existing check policy. |
-| `servicepulse.checks.down` | `servicepulse_checks_down_total` | DOWN results, including HTTP 4xx/5xx, connection failures, timeouts and interrupted attempts. |
+| `servicepulse.checks`, `status=UP` | `servicepulse_checks_total{status="UP"}` | UP results: HTTP 2xx or 3xx, using the existing check policy. |
+| `servicepulse.checks`, `status=DOWN` | `servicepulse_checks_total{status="DOWN"}` | DOWN results, including HTTP 4xx/5xx, connection failures, timeouts and interrupted attempts. |
 | `servicepulse.check.duration` | `servicepulse_check_duration_seconds_count`, `_seconds_sum`, `_seconds_max` | Timer using the existing `responseTimeMs` for every result, including failures. Count/sum are cumulative; max is Micrometer's time-window maximum. |
 | `servicepulse.scheduled.batches` | `servicepulse_scheduled_batches_total` | Batches started after acquiring the scheduler guard, including empty or subsequently failed batches. Skipped overlapping or already-interrupted calls do not count. |
 
 Manual and scheduled checks share one instrumentation point in `ServiceCheckService`.
-Each completed attempt is counted once, before writing history, so an attempt still
-counts if persistence fails. Unknown service IDs and failures before an HTTP result
+Each completed attempt increments exactly one outcome series, before writing history,
+so an attempt still counts if persistence fails. Unknown service IDs and failures before an HTTP result
 is produced do not count. Duration reuses the existing millisecond measurement of
 the HTTP attempt and excludes persistence and scheduler waiting time. No second
 HTTP request or independent timing mechanism is introduced.
 
-`ServicePulseMetrics` owns the instrumentation. Metrics are process-local and reset
-on restart; persisted history and `/services/{id}/stats` are unchanged. All five
-meters are registered at zero. Instrumentation is best-effort: registry exceptions
-are logged without stopping checks or history writes, but may lose or partially
-record a metric update.
+The completed-check total is **derived from UP + DOWN**, never maintained as a
+separate counter. For example, these PromQL expressions give the total across all
+scraped instances, or a separate total for each instance:
 
-Custom metrics have **no tags**. Separate UP/DOWN counters keep the set of time
-series fixed; service IDs, names, URLs and timestamps never become metric labels.
-Micrometer's counters and timers handle concurrent manual and scheduled updates.
+```promql
+sum(servicepulse_checks_total)
+sum without (status) (servicepulse_checks_total)
+```
+
+There is no untagged `servicepulse_checks_total`, `servicepulse_checks_up_total`, or
+`servicepulse_checks_down_total` series to diverge from the outcome counts.
+
+`ServicePulseMetrics` owns the instrumentation. Metrics are process-local and reset
+on restart; persisted history and `/services/{id}/stats` are unchanged. Both outcome
+series, the duration timer and the batch counter are registered at zero.
+Instrumentation is best-effort: registry exceptions are logged without stopping
+checks or history writes. A failed metric update can leave an attempt uncounted,
+and the duration timer may miss a sample; metrics are not a durable audit log.
+The reported total is always the sum of the recorded outcomes, including when an
+update fails; it is not an independently updated value or an atomic snapshot of
+all checks in progress.
+
+The check counter's only custom tag is **`status=UP|DOWN`**, with two fixed values.
+The duration timer and batch counter have no custom tags. Service IDs, names, URLs
+and timestamps never become metric labels. Micrometer's counters and timers handle
+concurrent manual and scheduled updates.
 
 ## Build an executable JAR
 

@@ -14,8 +14,6 @@ public class ServicePulseMetrics {
 
     private static final Logger logger = LoggerFactory.getLogger(ServicePulseMetrics.class);
     private static final String CHECKS = "servicepulse.checks";
-    private static final String UP_CHECKS = "servicepulse.checks.up";
-    private static final String DOWN_CHECKS = "servicepulse.checks.down";
     private static final String CHECK_DURATION = "servicepulse.check.duration";
     private static final String SCHEDULED_BATCHES = "servicepulse.scheduled.batches";
 
@@ -23,11 +21,10 @@ public class ServicePulseMetrics {
 
     public ServicePulseMetrics(MeterRegistry registry) {
         this.registry = registry;
-        // Publish zero-valued meters before the first check, without any service labels.
+        // Publish both outcomes at zero; status is the only check label.
         recordSafely(() -> {
-            registry.counter(CHECKS);
-            registry.counter(UP_CHECKS);
-            registry.counter(DOWN_CHECKS);
+            registry.counter(CHECKS, "status", HealthStatus.UP.name());
+            registry.counter(CHECKS, "status", HealthStatus.DOWN.name());
             registry.timer(CHECK_DURATION);
             registry.counter(SCHEDULED_BATCHES);
         });
@@ -35,8 +32,8 @@ public class ServicePulseMetrics {
 
     public void recordCheck(HealthCheckResponse result) {
         recordSafely(() -> {
-            registry.counter(CHECKS).increment();
-            registry.counter(result.status() == HealthStatus.UP ? UP_CHECKS : DOWN_CHECKS).increment();
+            // Record one outcome. The completed-check total is derived by summing both series.
+            registry.counter(CHECKS, "status", result.status().name()).increment();
             registry.timer(CHECK_DURATION).record(result.responseTimeMs(), TimeUnit.MILLISECONDS);
         });
     }

@@ -5,6 +5,7 @@ import java.time.Instant;
 import dev.taufeeqahmed.servicepulse.checking.HealthCheckResponse;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -57,9 +58,8 @@ class ActuatorEndpointsTest {
     @Test
     void prometheusExportsCountersAndDurationInSecondsWithoutServiceLabels() throws Exception {
         String before = scrape();
-        assertThat(sample(before, "servicepulse_checks_total")).isZero();
-        assertThat(sample(before, "servicepulse_checks_up_total")).isZero();
-        assertThat(sample(before, "servicepulse_checks_down_total")).isZero();
+        assertThat(sample(before, "servicepulse_checks_total{status=\"UP\"}")).isZero();
+        assertThat(sample(before, "servicepulse_checks_total{status=\"DOWN\"}")).isZero();
         assertThat(sample(before, "servicepulse_check_duration_seconds_count")).isZero();
         assertThat(sample(before, "servicepulse_scheduled_batches_total")).isZero();
 
@@ -70,15 +70,28 @@ class ActuatorEndpointsTest {
         metrics.recordScheduledBatch();
 
         String after = scrape();
-        assertThat(sample(after, "servicepulse_checks_total")).isEqualTo(2);
-        assertThat(sample(after, "servicepulse_checks_up_total")).isEqualTo(1);
-        assertThat(sample(after, "servicepulse_checks_down_total")).isEqualTo(1);
+        double up = sample(after, "servicepulse_checks_total{status=\"UP\"}");
+        double down = sample(after, "servicepulse_checks_total{status=\"DOWN\"}");
+        assertThat(up).isEqualTo(1);
+        assertThat(down).isEqualTo(1);
+        assertThat(up + down).isEqualTo(2);
+        assertThat(after.lines().filter(line -> line.startsWith("servicepulse_checks")))
+                .hasSize(2).allSatisfy(line -> assertThat(line)
+                        .matches("servicepulse_checks_total\\{status=\"(UP|DOWN)\"} [0-9.]+"));
         assertThat(sample(after, "servicepulse_check_duration_seconds_count")).isEqualTo(2);
         assertThat(sample(after, "servicepulse_check_duration_seconds_sum")).isCloseTo(0.2, within(0.000001));
         assertThat(sample(after, "servicepulse_scheduled_batches_total")).isEqualTo(1);
         assertThat(registry.getMeters().stream()
                 .filter(meter -> meter.getId().getName().startsWith("servicepulse.")))
-                .hasSize(5).allSatisfy(meter -> assertThat(meter.getId().getTags()).isEmpty());
+                .hasSize(4).allSatisfy(meter -> {
+                    if (meter.getId().getName().equals("servicepulse.checks")) {
+                        assertThat(meter.getId().getTags()).containsExactly(
+                                Tag.of("status", meter.getId().getTag("status")));
+                        assertThat(meter.getId().getTag("status")).isIn("UP", "DOWN");
+                    } else {
+                        assertThat(meter.getId().getTags()).isEmpty();
+                    }
+                });
     }
 
     private String scrape() throws Exception {
