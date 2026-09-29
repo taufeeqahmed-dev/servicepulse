@@ -7,8 +7,10 @@ import com.sun.net.httpserver.HttpServer;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
 import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -32,6 +34,12 @@ class ServiceMonitoringIntegrationTest {
     @Autowired
     private HealthCheckRepository checks;
 
+    @Autowired
+    private ServicePulseMetrics metrics;
+
+    @Autowired
+    private MeterRegistry registry;
+
     @Test
     void checksH2RegistrationsAndPersistsEachScheduledResultOnce() throws Exception {
         var failedRequests = new AtomicInteger();
@@ -54,7 +62,7 @@ class ServiceMonitoringIntegrationTest {
             String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
             var down = repository.saveAndFlush(new MonitoredService("Unavailable", baseUrl + "/down"));
             var up = repository.saveAndFlush(new MonitoredService("Healthy", baseUrl + "/up"));
-            var scheduler = new ServiceMonitoringScheduler(repository, checkService);
+            var scheduler = new ServiceMonitoringScheduler(repository, checkService, metrics);
 
             scheduler.checkRegisteredServices();
 
@@ -62,6 +70,11 @@ class ServiceMonitoringIntegrationTest {
             assertThat(healthyRequests.get()).isEqualTo(1);
             assertThat(repository.count()).isEqualTo(2);
             assertThat(checks.count()).isEqualTo(2);
+            assertThat(registry.get("servicepulse.checks").counter().count()).isEqualTo(2);
+            assertThat(registry.get("servicepulse.checks.up").counter().count()).isEqualTo(1);
+            assertThat(registry.get("servicepulse.checks.down").counter().count()).isEqualTo(1);
+            assertThat(registry.get("servicepulse.check.duration").timer().count()).isEqualTo(2);
+            assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(1);
             assertThat(checks.findByMonitoredService_IdOrderByCheckedAtDescIdDesc(down.getId()))
                     .singleElement().satisfies(check -> {
                         assertThat(check.getStatus()).isEqualTo(HealthStatus.DOWN);

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.junit.jupiter.api.Test;
@@ -35,6 +36,7 @@ class MonitoringConfigurationTest {
     void registersFixedDelayFromConfigurationAndRunsItsCallback(String interval, long seconds) {
         var repository = mock(MonitoredServiceRepository.class);
         var checkService = mock(ServiceCheckService.class);
+        var metrics = mock(ServicePulseMetrics.class);
         var taskScheduler = mock(TaskScheduler.class);
         ScheduledFuture<?> future = mock(ScheduledFuture.class);
         doReturn(future).when(taskScheduler)
@@ -47,6 +49,7 @@ class MonitoringConfigurationTest {
                 .withUserConfiguration(MonitoringConfiguration.class)
                 .withBean(MonitoredServiceRepository.class, () -> repository)
                 .withBean(ServiceCheckService.class, () -> checkService)
+                .withBean(ServicePulseMetrics.class, () -> metrics)
                 .withBean(TaskScheduler.class, () -> taskScheduler)
                 .withPropertyValues("servicepulse.monitoring.enabled=true",
                         "servicepulse.monitoring.poll-interval=" + interval)
@@ -66,6 +69,7 @@ class MonitoringConfigurationTest {
                     callback.getValue().run();
 
                     verify(checkService).check(1L);
+                    verify(metrics).recordScheduledBatch();
                 });
 
         verify(future).cancel(anyBoolean());
@@ -75,19 +79,21 @@ class MonitoringConfigurationTest {
     void disabledMonitoringRegistersNoScheduledTask() {
         var repository = mock(MonitoredServiceRepository.class);
         var checkService = mock(ServiceCheckService.class);
+        var metrics = mock(ServicePulseMetrics.class);
         var taskScheduler = mock(TaskScheduler.class);
 
         new ApplicationContextRunner()
                 .withUserConfiguration(MonitoringConfiguration.class)
                 .withBean(MonitoredServiceRepository.class, () -> repository)
                 .withBean(ServiceCheckService.class, () -> checkService)
+                .withBean(ServicePulseMetrics.class, () -> metrics)
                 .withBean(TaskScheduler.class, () -> taskScheduler)
                 .withPropertyValues("servicepulse.monitoring.enabled=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed()
                             .doesNotHaveBean(ServiceMonitoringScheduler.class)
                             .doesNotHaveBean(ScheduledAnnotationBeanPostProcessor.class);
-                    verifyNoInteractions(taskScheduler, repository, checkService);
+                    verifyNoInteractions(taskScheduler, repository, checkService, metrics);
                 });
     }
 }

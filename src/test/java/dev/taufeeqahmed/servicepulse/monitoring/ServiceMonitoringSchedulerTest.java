@@ -10,8 +10,10 @@ import java.util.concurrent.TimeUnit;
 import dev.taufeeqahmed.servicepulse.checking.HealthCheckResponse;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -41,10 +43,11 @@ class ServiceMonitoringSchedulerTest {
     private ServiceCheckService checkService;
 
     private ServiceMonitoringScheduler scheduler;
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUp() {
-        scheduler = new ServiceMonitoringScheduler(repository, checkService);
+        scheduler = new ServiceMonitoringScheduler(repository, checkService, new ServicePulseMetrics(registry));
     }
 
     @Test
@@ -56,6 +59,7 @@ class ServiceMonitoringSchedulerTest {
         scheduler.checkRegisteredServices();
 
         verify(checkService).check(1L);
+        assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(1);
     }
 
     @Test
@@ -70,6 +74,7 @@ class ServiceMonitoringSchedulerTest {
         var order = inOrder(checkService);
         order.verify(checkService).check(1L);
         order.verify(checkService).check(2L);
+        assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(1);
     }
 
     @Test
@@ -96,6 +101,7 @@ class ServiceMonitoringSchedulerTest {
 
         verify(repository, times(2)).findAll(Sort.by("id"));
         verify(checkService).check(1L);
+        assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(2);
     }
 
     @Test
@@ -119,6 +125,7 @@ class ServiceMonitoringSchedulerTest {
                 scheduler.checkRegisteredServices();
                 verify(checkService).check(1L);
                 verify(repository).findAll(Sort.by("id"));
+                assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(1);
             } finally {
                 release.countDown();
             }
@@ -127,6 +134,7 @@ class ServiceMonitoringSchedulerTest {
 
         scheduler.checkRegisteredServices();
         verify(checkService, times(2)).check(1L);
+        assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(2);
     }
 
     @Test
@@ -138,6 +146,7 @@ class ServiceMonitoringSchedulerTest {
 
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
             verifyNoInteractions(repository, checkService);
+            assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isZero();
         } finally {
             Thread.interrupted();
         }
@@ -164,6 +173,16 @@ class ServiceMonitoringSchedulerTest {
         scheduler.checkRegisteredServices();
         verify(checkService, times(2)).check(1L);
         verify(checkService).check(2L);
+    }
+
+    @Test
+    void countsAnEmptyBatchWithoutCheckingAnyService() {
+        when(repository.findAll(Sort.by("id"))).thenReturn(List.of());
+
+        scheduler.checkRegisteredServices();
+
+        verifyNoInteractions(checkService);
+        assertThat(registry.get("servicepulse.scheduled.batches").counter().count()).isEqualTo(1);
     }
 
     private static MonitoredService registered(long id) {

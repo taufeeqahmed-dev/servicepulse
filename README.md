@@ -5,7 +5,7 @@ Service reliability and monitoring platform built with Java 21 and Spring Boot.
 ServicePulse aims to help developers register services, monitor their availability
 and response times, and review reliability history through a REST API.
 
-**v0.6 adds Docker packaging and GitHub Actions CI. Persistent history and uptime statistics from v0.5, scheduled monitoring from v0.4, manual checks from v0.3, registration from v0.2, and the tested `GET /health` endpoint from v0.1 remain available.**
+**v0.7 adds Actuator health and Prometheus metrics. Docker and CI from v0.6, persistent history and uptime statistics from v0.5, scheduled monitoring from v0.4, manual checks from v0.3, registration from v0.2, and the tested `GET /health` endpoint from v0.1 remain available.**
 
 ```http
 GET /health
@@ -334,8 +334,70 @@ or updates the local development schema without dropping stored data; it is not 
 schema migration system. JDBC timestamps are configured for UTC. Tests use isolated
 databases rather than this file.
 
-Incident tracking, retries/backoff, alerts, PostgreSQL, cloud deployment, metrics
-integrations and dashboards remain future work.
+Incident tracking, retries/backoff, alerts, PostgreSQL, cloud deployment, external
+metrics servers and dashboards remain future work.
+
+## Observability (v0.7)
+
+The existing `GET /health` still returns plain text `UP`. Actuator adds two HTTP
+endpoints on the same application port (8080 by default), including in Docker:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /actuator/health` | Application health, including the database and disk health indicators; returns aggregate status without internal details. It does not check registered service URLs. |
+| `GET /actuator/prometheus` | Prometheus scrape output for JVM/HTTP metrics and the custom metrics below. |
+
+Exposure is explicit in `application.properties`:
+
+```properties
+management.endpoints.web.exposure.include=health,prometheus
+management.endpoint.health.show-details=never
+```
+
+Other Actuator endpoints, including `env`, `beans` and `metrics`, are not exposed
+over HTTP. These endpoints need no credentials in the local development setup.
+Prometheus and Grafana servers are **not bundled or deployed**; no scraping service,
+dashboards, alerting, tracing or cloud deployment is included in this milestone.
+
+```sh
+curl -i http://localhost:8080/health
+curl -i http://localhost:8080/actuator/health
+curl http://localhost:8080/actuator/prometheus
+```
+
+Use `curl.exe` instead of `curl` in Windows PowerShell. A healthy app returns HTTP
+200 and `{"status":"UP"}` from Actuator health. Actuator can report an unhealthy
+database even though the original fixed `/health` endpoint still returns `UP`.
+
+### Custom metrics
+
+Micrometer uses dotted names in Java and translates them to Prometheus names.
+Counters gain `_total`; timer durations are exported in seconds.
+
+| Micrometer name | Prometheus series | Meaning |
+| --- | --- | --- |
+| `servicepulse.checks` | `servicepulse_checks_total` | Completed HTTP check attempts with an UP or DOWN result. |
+| `servicepulse.checks.up` | `servicepulse_checks_up_total` | UP results: HTTP 2xx or 3xx, using the existing check policy. |
+| `servicepulse.checks.down` | `servicepulse_checks_down_total` | DOWN results, including HTTP 4xx/5xx, connection failures, timeouts and interrupted attempts. |
+| `servicepulse.check.duration` | `servicepulse_check_duration_seconds_count`, `_seconds_sum`, `_seconds_max` | Timer using the existing `responseTimeMs` for every result, including failures. Count/sum are cumulative; max is Micrometer's time-window maximum. |
+| `servicepulse.scheduled.batches` | `servicepulse_scheduled_batches_total` | Batches started after acquiring the scheduler guard, including empty or subsequently failed batches. Skipped overlapping or already-interrupted calls do not count. |
+
+Manual and scheduled checks share one instrumentation point in `ServiceCheckService`.
+Each completed attempt is counted once, before writing history, so an attempt still
+counts if persistence fails. Unknown service IDs and failures before an HTTP result
+is produced do not count. Duration reuses the existing millisecond measurement of
+the HTTP attempt and excludes persistence and scheduler waiting time. No second
+HTTP request or independent timing mechanism is introduced.
+
+`ServicePulseMetrics` owns the instrumentation. Metrics are process-local and reset
+on restart; persisted history and `/services/{id}/stats` are unchanged. All five
+meters are registered at zero. Instrumentation is best-effort: registry exceptions
+are logged without stopping checks or history writes, but may lose or partially
+record a metric update.
+
+Custom metrics have **no tags**. Separate UP/DOWN counters keep the set of time
+series fixed; service IDs, names, URLs and timestamps never become metric labels.
+Micrometer's counters and timers handle concurrent manual and scheduled updates.
 
 ## Build an executable JAR
 
@@ -482,6 +544,8 @@ the POM and wrapper configuration; Docker's builder cache is separate. New runs
 cancel older runs for the same Git ref, and the job has a 20-minute timeout. The
 image stays on the runner; CI does not log into or publish to a container registry.
 No secrets or local Docker installation are required to run these checks in CI.
+The v0.7 smoke-test extension also checks `/actuator/health` after each container
+startup and requires an UP status. Existing health and volume checks are preserved.
 
 ## Files and packages
 
@@ -518,6 +582,7 @@ servicepulse/
     |   |   |-- monitoring/
     |   |   |   |-- MonitoringConfiguration.java
     |   |   |   `-- ServiceMonitoringScheduler.java
+    |   |   |-- observability/ServicePulseMetrics.java
     |   |   `-- registration/
     |   |       |-- MonitoredService.java
     |   |       |-- MonitoredServiceRepository.java
@@ -539,6 +604,8 @@ servicepulse/
         |-- monitoring/MonitoringConfigurationTest.java
         |-- monitoring/ServiceMonitoringSchedulerTest.java
         |-- monitoring/ServiceMonitoringIntegrationTest.java
+        |-- observability/ActuatorEndpointsTest.java
+        |-- observability/ServicePulseMetricsTest.java
         `-- registration/ServiceRegistrationControllerTest.java
 ```
 
@@ -546,7 +613,10 @@ servicepulse/
 | --- | --- |
 | `Dockerfile` | Builds the JAR with Java 21 and runs it on a non-root Java 21 JRE image with writable volume storage. |
 | `.dockerignore` | Limits Docker build inputs and excludes local data, environment files and generated output. |
-| `.github/workflows/ci.yml` | Verifies Java 21 tests, builds the Docker image, and checks container health and H2 volume persistence on pushes and pull requests. |
+| `.github/workflows/ci.yml` | Verifies Java 21 tests, builds the Docker image, and checks fixed/Actuator health and H2 volume persistence on pushes and pull requests. |
+| `observability/ServicePulseMetrics.java` | Records counters and duration through Micrometer while isolating instrumentation failures. |
+| `ActuatorEndpointsTest.java` | Verifies endpoint exposure, Prometheus metric names/values, timer units and absence of custom tags. |
+| `ServicePulseMetricsTest.java` | Verifies registry, counter and timer failures cannot escape instrumentation or clear interruption. |
 | `pom.xml` | Pins Spring Boot 4.1.1, targets Java 21, declares dependencies, and configures executable JAR packaging. |
 | `ServicePulseApplication.java` | Starts Spring Boot. Its root package lets Spring discover components in subpackages. |
 | `health/HealthController.java` | Maps `GET /health` to the plain text response `UP`. |
@@ -586,7 +656,8 @@ servicepulse/
 | `README.md` | Setup, usage, and an explanation of the starter. |
 
 Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health`,
-`registration`, `checking`, `monitoring`, and `history`. Add future feature packages alongside them when needed.
+`registration`, `checking`, `monitoring`, `history`, and `observability`. Add future
+feature packages alongside them when needed.
 
 ## Dependencies
 
@@ -597,8 +668,11 @@ Spring Boot manages compatible dependency versions through its Maven parent.
 | `spring-boot-starter-webmvc` | Spring Web MVC and embedded Tomcat for serving HTTP requests. This is the Spring MVC web starter for Spring Boot 4. |
 | `spring-boot-starter-data-jpa` | Spring Data repositories and Hibernate for storing registered services and check history. |
 | `spring-boot-starter-validation` | Jakarta Bean Validation for required fields, length limits, and HTTP/HTTPS URL validation. |
+| `spring-boot-starter-actuator` | Application health endpoints and Micrometer instrumentation support. |
+| `micrometer-registry-prometheus` | Exports metrics in Prometheus scrape format. |
 | `h2` (runtime) | An embedded database with file-backed development storage and isolated test databases. |
 | `spring-boot-starter-webmvc-test` (test) | Spring MVC testing support and Spring Boot's test starter, including JUnit Jupiter and MockMvc. |
+| `spring-boot-micrometer-metrics-test` (test) | Enables the real Prometheus registry in the endpoint integration test through `@AutoConfigureMetrics`; ordinary Spring Boot tests disable external registries. |
 
 H2 uses the local development username `sa` with an empty password. Hibernate
 maintains the `monitored_services` and `health_checks` tables. The development
@@ -607,7 +681,8 @@ dependencies or H2 browser console are introduced in v0.5.
 
 ## Roadmap
 
-The v0.1-v0.5 releases are complete. v0.6 adds Docker packaging and CI; v0.7 remains planned.
+The v0.1-v0.6 releases are complete, including the v0.6.1 Docker runtime smoke-test
+patch. v0.7 adds observability only; alerts and deployment remain future work.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -616,12 +691,14 @@ The v0.1-v0.5 releases are complete. v0.6 adds Docker packaging and CI; v0.7 rem
 | v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Complete (`v0.3.0`) |
 | v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Complete (`v0.4.0`) |
 | v0.5 | Persistent check history in H2, history API and uptime statistics for manual and scheduled checks. | Complete (`v0.5.0`) |
-| v0.6 | Docker packaging, persistent H2 volume support and automated verification/image builds with GitHub Actions. | Current |
-| v0.7 | Application metrics, basic alerts, and deployment documentation. | Planned |
+| v0.6 | Docker packaging, persistent H2 volume support and automated verification/build/runtime smoke tests with GitHub Actions. | Complete (`v0.6.1`) |
+| v0.7 | Actuator health, Prometheus export and custom check/batch metrics. | Current (unreleased) |
 
 ## Official references
 
 - [Spring Boot documentation](https://docs.spring.io/spring-boot/)
+- [Actuator endpoint exposure](https://docs.spring.io/spring-boot/reference/actuator/endpoints.html)
+- [Micrometer Prometheus registry](https://docs.micrometer.io/micrometer/reference/implementations/prometheus.html)
 - [Spring Boot testing](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
 - [Spring scheduling](https://docs.spring.io/spring-framework/reference/integration/scheduling.html)
 - [Spring Data JPA projections](https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html)

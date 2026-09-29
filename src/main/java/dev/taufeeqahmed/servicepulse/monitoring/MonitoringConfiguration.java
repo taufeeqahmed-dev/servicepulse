@@ -1,6 +1,7 @@
 package dev.taufeeqahmed.servicepulse.monitoring;
 
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -14,7 +15,7 @@ public class MonitoringConfiguration {
 
     @Bean
     ServiceMonitoringScheduler serviceMonitoringScheduler(MonitoredServiceRepository repository,
-            ServiceCheckService checkService) {
-        return new ServiceMonitoringScheduler(repository, checkService);
+            ServiceCheckService checkService, ServicePulseMetrics metrics) {
+        return new ServiceMonitoringScheduler(repository, checkService, metrics);
     }
 }

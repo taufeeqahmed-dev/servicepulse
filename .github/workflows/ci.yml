@@ -74,6 +74,9 @@ jobs:
               --mount "type=volume,source=$SMOKE_VOLUME,target=/app/data" \
               --env SERVICEPULSE_MONITORING_ENABLED=false servicepulse:ci
             wait_until_ready
+            curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+              http://127.0.0.1:8080/actuator/health | jq --exit-status '.status == "UP"'
+            echo "Actuator health is UP inside the running container."
           }
 
           docker volume create "$SMOKE_VOLUME"

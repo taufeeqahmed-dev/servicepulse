@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.micrometer.core.instrument.MeterRegistry;
 import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
@@ -60,6 +61,9 @@ class ServiceCheckControllerTest {
 
     @Autowired
     private HealthCheckRepository checks;
+
+    @Autowired
+    private MeterRegistry metrics;
 
     private HttpServer server;
     private ExecutorService executor;
@@ -203,9 +207,11 @@ class ServiceCheckControllerTest {
 
     @Test
     void returnsNotFoundForUnknownService() throws Exception {
+        double countBefore = metrics.get("servicepulse.checks").counter().count();
         mockMvc.perform(post("/services/{id}/check", Long.MAX_VALUE))
                 .andExpect(status().isNotFound());
         assertThat(checks.count()).isZero();
+        assertThat(metrics.get("servicepulse.checks").counter().count()).isEqualTo(countBefore);
     }
 
     @Test
@@ -242,6 +248,12 @@ class ServiceCheckControllerTest {
 
     private ResultActions check(MonitoredService registered) throws Exception {
         long countBefore = checks.count();
+        double checksBefore = metrics.get("servicepulse.checks").counter().count();
+        double upBefore = metrics.get("servicepulse.checks.up").counter().count();
+        double downBefore = metrics.get("servicepulse.checks.down").counter().count();
+        var duration = metrics.get("servicepulse.check.duration").timer();
+        long durationsBefore = duration.count();
+        double timeBefore = duration.totalTime(TimeUnit.MILLISECONDS);
         var result = mockMvc.perform(post("/services/{id}/check", registered.getId()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
@@ -255,6 +267,14 @@ class ServiceCheckControllerTest {
         assertThat(saved.getHttpStatus()).isEqualTo(response.httpStatus());
         assertThat(saved.getResponseTimeMs()).isEqualTo(response.responseTimeMs());
         assertThat(saved.getCheckedAt()).isCloseTo(response.checkedAt(), within(1, ChronoUnit.MICROS));
+        assertThat(metrics.get("servicepulse.checks").counter().count()).isEqualTo(checksBefore + 1);
+        assertThat(metrics.get("servicepulse.checks.up").counter().count())
+                .isEqualTo(upBefore + (response.status() == HealthStatus.UP ? 1 : 0));
+        assertThat(metrics.get("servicepulse.checks.down").counter().count())
+                .isEqualTo(downBefore + (response.status() == HealthStatus.DOWN ? 1 : 0));
+        assertThat(duration.count()).isEqualTo(durationsBefore + 1);
+        assertThat(duration.totalTime(TimeUnit.MILLISECONDS))
+                .isCloseTo(timeBefore + response.responseTimeMs(), within(0.001));
         return result;
     }
 

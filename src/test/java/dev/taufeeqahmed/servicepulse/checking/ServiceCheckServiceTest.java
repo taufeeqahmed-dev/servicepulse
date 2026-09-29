@@ -8,8 +8,10 @@ import java.time.Duration;
 import java.util.Optional;
 
 import dev.taufeeqahmed.servicepulse.history.CheckHistoryService;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
@@ -26,6 +28,7 @@ class ServiceCheckServiceTest {
 
     private final MonitoredService registered = new MonitoredService("Local API", "http://localhost/health");
     private final CheckHistoryService history = mock(CheckHistoryService.class);
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private ServiceCheckService service;
 
     @BeforeEach
@@ -35,7 +38,8 @@ class ServiceCheckServiceTest {
         when(repository.findById(1L)).thenReturn(Optional.of(registered));
         when(httpClient.send(any(HttpRequest.class), ArgumentMatchers.<HttpResponse.BodyHandler<InputStream>>any()))
                 .thenThrow(new InterruptedException("Simulated interruption"));
-        service = new ServiceCheckService(repository, httpClient, history, Duration.ofSeconds(5));
+        service = new ServiceCheckService(repository, httpClient, history,
+                new ServicePulseMetrics(registry), Duration.ofSeconds(5));
     }
 
     @Test
@@ -53,6 +57,7 @@ class ServiceCheckServiceTest {
             assertThat(result.status()).isEqualTo(HealthStatus.DOWN);
             assertThat(result.httpStatus()).isNull();
             verify(history).record(registered, result);
+            assertThat(registry.get("servicepulse.checks.down").counter().count()).isEqualTo(1);
         } finally {
             // Do not leak the test's interrupt flag to JUnit or another test.
             Thread.interrupted();
@@ -72,6 +77,9 @@ class ServiceCheckServiceTest {
                     .hasMessage("Simulated persistence failure");
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
             verify(history).record(any(), any());
+            assertThat(registry.get("servicepulse.checks").counter().count()).isEqualTo(1);
+            assertThat(registry.get("servicepulse.checks.down").counter().count()).isEqualTo(1);
+            assertThat(registry.get("servicepulse.check.duration").timer().count()).isEqualTo(1);
         } finally {
             Thread.interrupted();
         }
