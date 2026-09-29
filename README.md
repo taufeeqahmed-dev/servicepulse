@@ -1,730 +1,119 @@
 # ServicePulse
 
-Service reliability and monitoring platform built with Java 21 and Spring Boot.
+ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services. It combines manual and scheduled checks with persistent history, uptime statistics, and Actuator/Prometheus observability.
 
-ServicePulse aims to help developers register services, monitor their availability
-and response times, and review reliability history through a REST API.
+**Current release: [v0.7.0](https://github.com/taufeeqahmed-dev/servicepulse/tree/v0.7.0) — released**
 
-**v0.7 adds Actuator health and Prometheus metrics. Docker and CI from v0.6, persistent history and uptime statistics from v0.5, scheduled monitoring from v0.4, manual checks from v0.3, registration from v0.2, and the tested `GET /health` endpoint from v0.1 remain available.**
+## Features
 
-```http
-GET /health
-```
+- Validated service registration and HTTP checks with failure handling.
+- UP/DOWN results, response times, UTC timestamps and per-service uptime.
+- **73 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
 
-It returns HTTP `200 OK`, content type `text/plain`, and the exact body `UP`.
-This is a fixed response confirming that the app can serve a request; it does
-not check any external service or report database health.
+## Tech stack
 
-## Requirements
+Java 21 · Spring Boot · Spring Web · Spring Data JPA · H2 · Maven · JUnit/Mockito · Actuator/Micrometer · Docker · GitHub Actions
 
-- **JDK 21**. Set your IDE's project SDK and Maven runner JDK to 21. For terminal
-  use, point `JAVA_HOME` at your JDK 21 folder and put its `bin` folder on `PATH`.
-- Internet access for the first build, which downloads Maven and dependencies.
-- Maven is supplied by the checked-in wrapper; a separate installation is optional.
-- For Docker usage, use a current Docker Engine or Docker Desktop with Linux
-  containers. Docker builds supply their own Java and Maven; a host JDK is only
-  needed for running Maven or the JAR directly.
+## API
 
-Check the Java version with `java -version`. The build also reports its Java
-installation when you run `.\mvnw.cmd -version` on Windows or `sh mvnw -version`
-on macOS/Linux.
+Base URL: `http://localhost:8080`.
 
-## Open in your IDE
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Fixed `200 OK` / `UP`. |
+| `POST /services` | Register a service; returns `201`. |
+| `GET /services` | List services. |
+| `POST /services/{id}/check` | Run and persist a check. |
+| `GET /services/{id}/checks` | History, newest first. |
+| `GET /services/{id}/stats` | Counts, uptime and response-time statistics. |
+| `GET /actuator/health` | Application health. |
+| `GET /actuator/prometheus` | Prometheus metrics. |
 
-Clone the repository:
+HTTP 200–399 means UP; other responses, timeouts and connection failures mean DOWN. Redirects are not followed. A completed check returns API `200` even for DOWN; `httpStatus` is null without an HTTP response. Invalid registration returns `400`; unknown service IDs return `404`.
+
+## Quick start
+
+Install JDK 21 and set `JAVA_HOME`:
 
 ```sh
 git clone https://github.com/taufeeqahmed-dev/servicepulse.git
 cd servicepulse
+./mvnw clean verify
+./mvnw spring-boot:run
 ```
 
-1. Open the cloned `servicepulse` project folder or its `pom.xml` in your IDE.
-2. Import it as a Maven project and let the dependencies finish downloading.
-3. Select JDK 21 for both the project and Maven runner.
-4. Run `dev.taufeeqahmed.servicepulse.ServicePulseApplication`.
+PowerShell: replace `./mvnw` with `.\mvnw.cmd`. For IDE use, open `pom.xml` with JDK 21.
 
-IntelliJ IDEA, Eclipse, and VS Code with Java support can import this Maven project.
-The commands below should be run from the folder containing `pom.xml`.
+## Example
 
-## Run and test
+Register a target:
 
-**Windows PowerShell:**
+```http
+POST /services
+Content-Type: application/json
 
-```powershell
-.\mvnw.cmd test
-.\mvnw.cmd spring-boot:run
+{"name":"Local API","url":"http://localhost:8080/health"}
 ```
 
-**macOS/Linux:**
-
-```sh
-sh mvnw test
-sh mvnw spring-boot:run
-```
-
-Once the application starts, open <http://localhost:8080/health> in a browser.
-To see the HTTP status and response headers from a second terminal:
-
-```powershell
-curl.exe -i http://localhost:8080/health
-```
-
-Use `curl -i http://localhost:8080/health` on macOS/Linux. Stop the application
-with `Ctrl+C`.
-
-If port 8080 is in use, run
-`.\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--server.port=8081"`
-on Windows, or `sh mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8081`
-on macOS/Linux, then visit <http://localhost:8081/health>.
-
-The tests start the Spring application context, including JPA and H2, and use
-MockMvc to verify `/health`, service creation and listing, invalid requests, and
-on-demand checks. Registration tests use the real database and roll back their
-changes for isolation. Check tests use a separate H2 database and Java's local
-HTTP server on a temporary loopback port, covering success, redirects, errors,
-timeouts, connection failures, and slow response bodies without contacting public
-websites. MockMvc exercises the app's request handling without opening an app port.
-These API tests disable scheduled monitoring so background work cannot contact
-their fixture URLs. Scheduler tests invoke captured Spring callbacks directly and
-use latches to coordinate concurrent invocations, without long sleeps. They cover
-failure isolation, later-run recovery, configuration, overlap prevention and
-interrupt preservation. A separate integration test checks real H2 registrations
-through the existing HTTP-check service against a local server. Manual and scheduled
-integration tests verify exactly one saved result per check, including DOWN outcomes
-and nullable HTTP status on network failures. History and stats tests use fixed
-timestamps and durations to verify ordering, isolation, aggregates and empty results.
-The `test` profile uses in-memory H2; a restart test uses its own temporary file
-database to verify that registrations and check history survive closing and reopening
-the application. Tests never use the development database under `data/`.
-
-## Service registration (v0.2)
-
-| Endpoint | Success response |
-| --- | --- |
-| `POST /services` | `201 Created` with the registered service, including its generated ID. |
-| `GET /services` | `200 OK` with all registered services ordered by ID, or `[]` when none exist. |
-
-Send this JSON body to `POST /services` with `Content-Type: application/json`:
-
-```json
-{
-  "name": "OpenAI",
-  "url": "https://openai.com"
-}
-```
-
-Example response (the ID is generated by the database):
-
-```json
-{
-  "id": 1,
-  "name": "OpenAI",
-  "url": "https://openai.com"
-}
-```
-
-`GET /services` returns an array of objects with the same fields.
-
-Both fields must be nonblank. Names may contain up to 255 characters and URLs
-up to 2,048 characters, matching the database columns. URLs must be absolute
-HTTP or HTTPS URLs with a valid host and port. Validation checks syntax only;
-registration does not contact the URL. Duplicate names or URLs are allowed.
-
-Invalid fields return `400 Bad Request` with `application/problem+json` and
-field-specific messages. For example:
-
-```json
-{
-  "title": "Invalid request",
-  "status": 400,
-  "detail": "Request validation failed.",
-  "instance": "/services",
-  "errors": {
-    "url": "url must be a valid HTTP or HTTPS URL"
-  }
-}
-```
-
-Malformed JSON also returns a clear `400 Bad Request`. Registrations are stored
-in H2. From v0.5, the development database is file-backed and survives restarts.
-
-## On-demand HTTP checks (v0.3)
-
-After registering a service, send `POST /services/{id}/check` with its ID. No
-request body is needed. ServicePulse loads the stored URL and makes an HTTP `GET`
-request to it. For example, to check service 1:
-
-```powershell
-curl.exe -X POST http://localhost:8080/services/1/check
-```
-
-Use `curl` instead of `curl.exe` on macOS/Linux. Example response:
+Call `POST /services/{returnedId}/check`. Example response:
 
 ```json
 {
   "serviceId": 1,
-  "name": "OpenAI",
-  "url": "https://openai.com",
+  "name": "Local API",
+  "url": "http://localhost:8080/health",
   "status": "UP",
   "httpStatus": 200,
-  "responseTimeMs": 143,
-  "checkedAt": "2026-09-28T20:45:00Z"
+  "responseTimeMs": 12,
+  "checkedAt": "2026-09-29T15:00:00Z"
 }
 ```
 
-| Outcome | Check result |
+## Scheduled monitoring
+
+Sequential batches run after an initial delay and a fixed delay between completed batches; both default to 30 seconds. Configure `servicepulse.monitoring.poll-interval`; disable with `servicepulse.monitoring.enabled=false`. Failures are isolated. Scheduled batches cannot overlap within one instance; manual checks may run concurrently.
+
+## History and uptime
+
+H2 persists registrations and results under `./data/`. Statistics use database aggregates: uptime is `UP / total × 100` per attempt; average response time includes failures and timeouts. With no checks, counts are zero; uptime, average and latest timestamp are null.
+
+## Observability
+
+Only Actuator health and Prometheus are exposed; health details are hidden.
+
+| Metric | Measures |
 | --- | --- |
-| Target returns HTTP 200–399 | `UP`, with the target's HTTP status. Redirects are reported without following them. |
-| Target returns HTTP 400–599 | `DOWN`, with the target's HTTP status. |
-| Timeout or connection failure | `DOWN`, with `httpStatus: null`. |
-| Service ID does not exist | API returns `404 Not Found` with no response body. |
-| Service ID is not a number | API returns `400 Bad Request`. |
+| `servicepulse_checks_total{status="UP"}` | UP checks. |
+| `servicepulse_checks_total{status="DOWN"}` | DOWN checks. |
+| `servicepulse_check_duration_seconds_*` | Duration: count, sum and max. |
+| `servicepulse_scheduled_batches_total` | Started batches. |
 
-For an existing service, the API returns `200 OK` with the check result, including
-when the target is `DOWN`. This API status is separate from the target's
-`httpStatus`. `UP` means the initial HTTP response met the rule above; it does not
-verify the response body or the target's dependencies.
+Total checks are the sum of UP and DOWN; no independent total exists. The only custom check label is `status`. Metrics count attempts before persistence and reset on restart. Recording failures cannot stop monitoring but may lose samples. Prometheus/Grafana servers are not bundled.
 
-`responseTimeMs` measures elapsed HTTP check time using a monotonic clock,
-excluding the database lookup and history write. The response stream is closed as soon as headers
-arrive without reading the body, so a slow or streaming body cannot hold up the check.
-`checkedAt` is the UTC timestamp at the start of the HTTP request.
-
-The defaults in `application.properties` are a 2-second connection timeout
-(`servicepulse.check.connect-timeout`) and a 5-second response timeout
-(`servicepulse.check.request-timeout`). Both must be positive durations. A reusable
-Java HTTP client performs the requests; no new dependencies are required.
-The database lookup finishes before the network call. In v0.3 results were only
-returned to the caller; from v0.5 the shared check service also saves each result
-in a short transaction after the network call completes.
-
-Each call performs a fresh, manual check. The scheduled monitoring added in v0.4
-uses the same HTTP-check service and the same UP/DOWN policy.
-
-## Scheduled monitoring (v0.4)
-
-Monitoring is enabled by default. After the initial polling interval, the
-scheduler loads all registered services in ID order and checks them one at a time
-using the existing v0.3 `ServiceCheckService`. Each result is written to the app
-log with the service ID, UP/DOWN status, target HTTP status and response time.
-From v0.5, the same shared service also persists each result for history and stats.
-
-Configure these startup properties in `application.properties` or override them
-with Spring Boot command-line arguments/environment variables:
-
-| Property | Development default | Meaning |
-| --- | --- | --- |
-| `servicepulse.monitoring.enabled` | `true` | Set to `false` to disable automatic checks. The manual endpoint remains available. |
-| `servicepulse.monitoring.poll-interval` | `30s` | Positive fixed delay after a batch finishes, also used before the first batch. Duration formats such as `10s` or `PT1M` are supported. |
-
-For example, to disable monitoring when running the packaged app:
-
-```powershell
-java -jar target/servicepulse-0.0.1-SNAPSHOT.jar --servicepulse.monitoring.enabled=false
-```
-
-Restart the app after changing these settings. HTTP connection and response
-timeouts remain controlled by the existing `servicepulse.check.*` properties;
-scheduled checks use exactly the same timeouts as manual checks.
-
-A fixed delay starts after the previous batch completes, rather than starting a
-new batch while checks are still running. An atomic run guard also rejects
-concurrent invocations of the scheduler. This prevents overlapping scheduled
-checks in one app instance without a worker pool or per-service locks. Since
-services are checked sequentially, slow services extend the batch duration and
-the time between checks of an individual service.
-
-The manual `POST /services/{id}/check` endpoint is independent of this guard and
-keeps its existing response contract. Manual and scheduled checks can therefore
-run concurrently; the guard only coordinates scheduled batches in this instance.
-
-A DOWN result or unexpected exception from one service does not prevent checks
-of the remaining services. If loading registrations or running a batch fails,
-the error is logged and the guard is released so later scheduled runs can proceed.
-If the thread is interrupted, the batch stops without checking further services
-and the interrupt flag is preserved. Database transactions do not span HTTP calls.
-
-Each completed manual or scheduled attempt contributes one history row. Concurrent
-manual and scheduled requests are separate attempts and each is counted once.
-If saving fails, the manual request fails; a scheduled batch logs the failure and
-continues with the next service. No retry or second write is attempted. For an
-interrupted HTTP attempt, saving the DOWN result is attempted before restoring the
-interrupt flag. The flag is restored even if saving fails, and the scheduler stops
-the batch as before.
-
-## Persistent check history and uptime (v0.5)
-
-Both check entry points reuse the existing HTTP-check result. A `HealthCheck` row
-stores a generated ID, a required lazy many-to-one reference to `MonitoredService`,
-UP/DOWN status as text, nullable target HTTP status, elapsed milliseconds, and the
-UTC `checkedAt` timestamp. The existing manual response contract is unchanged.
-Disabling scheduled monitoring does not disable manual checks or history recording.
-
-| Endpoint | Success response |
-| --- | --- |
-| `GET /services/{id}/checks` | `200 OK` with all stored checks for that service, newest first, or `[]` for no checks. |
-| `GET /services/{id}/stats` | `200 OK` with aggregate statistics across all stored checks for that service. |
-
-Both endpoints return `404 Not Found` with no body for an unknown service ID,
-matching the manual check endpoint. A nonnumeric ID returns `400 Bad Request`.
-Responses are records rather than JPA entities, and reading them makes no HTTP checks.
-
-For example:
-
-```powershell
-curl.exe http://localhost:8080/services/1/checks
-curl.exe http://localhost:8080/services/1/stats
-```
-
-Use `curl` on macOS/Linux. Example history response:
-
-```json
-[
-  {
-    "id": 1,
-    "serviceId": 1,
-    "status": "UP",
-    "httpStatus": 200,
-    "responseTimeMs": 143,
-    "checkedAt": "2026-09-28T22:30:00Z"
-  }
-]
-```
-
-History is ordered by `checkedAt` descending, then ID descending to resolve equal
-timestamps. There is no pagination or automatic retention/deletion in this milestone.
-An index on `(service_id, checked_at, id)` supports service lookup and ordering.
-The foreign key is required; there is no cascading deletion or reverse history
-collection on `MonitoredService`.
-
-Example stats response:
-
-```json
-{
-  "serviceId": 1,
-  "totalChecks": 100,
-  "upChecks": 97,
-  "downChecks": 3,
-  "uptimePercentage": 97.00,
-  "averageResponseTimeMs": 145.60,
-  "lastCheckedAt": "2026-09-28T22:30:00Z"
-}
-```
-
-- `uptimePercentage = upChecks / totalChecks * 100`. This is the proportion of
-  successful attempts, not a time-weighted availability or SLA measurement. Manual
-  and scheduled checks have equal weight and use the existing UP/DOWN policy.
-- `averageResponseTimeMs` includes every stored attempt, including DOWN responses,
-  connection failures, timeouts and interrupted HTTP requests. It measures the HTTP
-  attempt duration, excluding registration lookup and history persistence.
-- Both metrics use two decimal places with half-up rounding. `lastCheckedAt` is
-  the latest request-start timestamp, returned in UTC (ISO 8601 with `Z`).
-- With zero checks, all counts are `0`; `uptimePercentage`, `averageResponseTimeMs`
-  and `lastCheckedAt` are `null`, meaning no measurement is available.
-
-Counts, average and latest timestamp are calculated together in one database
-aggregate query, without loading history rows into memory. History/stats use read-only
-transactions; each result write has its own short transaction after the HTTP request.
-
-The default URL is `jdbc:h2:file:./data/servicepulse;DB_CLOSE_ON_EXIT=FALSE`.
-Run from the project folder so the relative path consistently identifies the same
-database. H2 creates `data/servicepulse.mv.db`, which is ignored by Git. Registrations
-and checks survive normal shutdown and restart. Hibernate's `ddl-auto=update` creates
-or updates the local development schema without dropping stored data; it is not a
-schema migration system. JDBC timestamps are configured for UTC. Tests use isolated
-databases rather than this file.
-
-Incident tracking, retries/backoff, alerts, PostgreSQL, cloud deployment, external
-metrics servers and dashboards remain future work.
-
-## Observability (v0.7)
-
-The existing `GET /health` still returns plain text `UP`. Actuator adds two HTTP
-endpoints on the same application port (8080 by default), including in Docker:
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /actuator/health` | Application health, including the database and disk health indicators; returns aggregate status without internal details. It does not check registered service URLs. |
-| `GET /actuator/prometheus` | Prometheus scrape output for JVM/HTTP metrics and the custom metrics below. |
-
-Exposure is explicit in `application.properties`:
-
-```properties
-management.endpoints.web.exposure.include=health,prometheus
-management.endpoint.health.show-details=never
-```
-
-Other Actuator endpoints, including `env`, `beans` and `metrics`, are not exposed
-over HTTP. These endpoints need no credentials in the local development setup.
-Prometheus and Grafana servers are **not bundled or deployed**; no scraping service,
-dashboards, alerting, tracing or cloud deployment is included in this milestone.
+## Docker and CI
 
 ```sh
-curl -i http://localhost:8080/health
-curl -i http://localhost:8080/actuator/health
-curl http://localhost:8080/actuator/prometheus
-```
-
-Use `curl.exe` instead of `curl` in Windows PowerShell. A healthy app returns HTTP
-200 and `{"status":"UP"}` from Actuator health. Actuator can report an unhealthy
-database even though the original fixed `/health` endpoint still returns `UP`.
-
-### Custom metrics
-
-Micrometer uses dotted names in Java and translates them to Prometheus names.
-Counters gain `_total`; timer durations are exported in seconds.
-
-| Micrometer name | Prometheus series | Meaning |
-| --- | --- | --- |
-| `servicepulse.checks`, `status=UP` | `servicepulse_checks_total{status="UP"}` | UP results: HTTP 2xx or 3xx, using the existing check policy. |
-| `servicepulse.checks`, `status=DOWN` | `servicepulse_checks_total{status="DOWN"}` | DOWN results, including HTTP 4xx/5xx, connection failures, timeouts and interrupted attempts. |
-| `servicepulse.check.duration` | `servicepulse_check_duration_seconds_count`, `_seconds_sum`, `_seconds_max` | Timer using the existing `responseTimeMs` for every result, including failures. Count/sum are cumulative; max is Micrometer's time-window maximum. |
-| `servicepulse.scheduled.batches` | `servicepulse_scheduled_batches_total` | Batches started after acquiring the scheduler guard, including empty or subsequently failed batches. Skipped overlapping or already-interrupted calls do not count. |
-
-Manual and scheduled checks share one instrumentation point in `ServiceCheckService`.
-Each completed attempt increments exactly one outcome series, before writing history,
-so an attempt still counts if persistence fails. Unknown service IDs and failures before an HTTP result
-is produced do not count. Duration reuses the existing millisecond measurement of
-the HTTP attempt and excludes persistence and scheduler waiting time. No second
-HTTP request or independent timing mechanism is introduced.
-
-The completed-check total is **derived from UP + DOWN**, never maintained as a
-separate counter. For example, these PromQL expressions give the total across all
-scraped instances, or a separate total for each instance:
-
-```promql
-sum(servicepulse_checks_total)
-sum without (status) (servicepulse_checks_total)
-```
-
-There is no untagged `servicepulse_checks_total`, `servicepulse_checks_up_total`, or
-`servicepulse_checks_down_total` series to diverge from the outcome counts.
-
-`ServicePulseMetrics` owns the instrumentation. Metrics are process-local and reset
-on restart; persisted history and `/services/{id}/stats` are unchanged. Both outcome
-series, the duration timer and the batch counter are registered at zero.
-Instrumentation is best-effort: registry exceptions are logged without stopping
-checks or history writes. A failed metric update can leave an attempt uncounted,
-and the duration timer may miss a sample; metrics are not a durable audit log.
-The reported total is always the sum of the recorded outcomes, including when an
-update fails; it is not an independently updated value or an atomic snapshot of
-all checks in progress.
-
-The check counter's only custom tag is **`status=UP|DOWN`**, with two fixed values.
-The duration timer and batch counter have no custom tags. Service IDs, names, URLs
-and timestamps never become metric labels. Micrometer's counters and timers handle
-concurrent manual and scheduled updates.
-
-## Build an executable JAR
-
-```powershell
-.\mvnw.cmd clean verify
-java -jar target/servicepulse-0.0.1-SNAPSHOT.jar
-```
-
-On macOS/Linux, replace `.\mvnw.cmd` with `sh mvnw`. `clean verify` runs the test
-and builds the executable JAR. Generated files live in the ignored `target/` folder.
-
-## Docker (v0.6)
-
-Run these commands from the project folder. The single-line Docker commands work
-in both Windows PowerShell and standard POSIX shells:
-
-```sh
-docker build -t servicepulse:dev .
+docker build -t servicepulse:local .
 docker volume create servicepulse-data
-docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:dev
-docker logs servicepulse
+docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:local
 ```
 
-Wait for the startup log, then check `http://localhost:8080/health`:
+The multi-stage Java 21 image runs **non-root**. Its named volume preserves H2 data under `/app/data`.
 
-```powershell
-curl.exe -i http://localhost:8080/health
-```
+[CI](.github/workflows/ci.yml) verifies tests before building Docker, checks application/Actuator health, and confirms registrations survive container replacement using the same volume.
 
-Use `curl -i` on macOS/Linux. Expect `200 OK` with body `UP`. Port 8080 in the
-container is mapped to port 8080 on the host's loopback interface. If the host
-port is busy, use `-p 127.0.0.1:8081:8080` and visit port 8081; the application
-inside the container still uses port 8080.
+## Architecture
 
-The Dockerfile uses two stages: Eclipse Temurin's Java 21 JDK builds the executable
-JAR with the checked-in Maven wrapper, then a smaller Java 21 JRE image runs it.
-The runtime image contains the JAR without Maven, source files or build caches.
-It runs as UID/GID `10001:10001`, with `/app/data` writable by that user. The
-exec-form entry point sends stop signals directly to Java.
-
-The build uses a BuildKit Maven cache for repeated builds on the same builder.
-Image packaging skips test execution because CI runs `clean verify` first; for
-local verification run `.\mvnw.cmd clean verify` (or `./mvnw clean verify`) before
-building the image. Base images are pinned by digest and workflow actions by
-commit SHA; update those pins deliberately when taking upstream updates.
-The `.dockerignore` allowlist sends only the POM, wrapper and source tree, excluding
-local databases, environment files, Git metadata, IDE settings and build output.
-
-### Persistent data and configuration
-
-The named volume is mounted at **`/app/data`**. H2 stores
-`/app/data/servicepulse.mv.db` there, including registrations and check history.
-Reuse the same volume when restarting or replacing the container. Removing the
-container does not delete this named volume. Without the mount, data is stored
-in the container's writable layer and is lost when that container is removed.
-
-The image creates the data directory with the non-root user's ownership, which
-Docker carries into a new empty named volume. For an existing volume or a bind
-mount, ensure the directory is writable by UID/GID `10001:10001`. Run only one
-ServicePulse container against a given embedded H2 database at a time.
-
-Pass overrides with `docker run -e NAME=value` before the image name:
-
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `SPRING_DATASOURCE_URL` | `jdbc:h2:file:/app/data/servicepulse;DB_CLOSE_ON_EXIT=FALSE` in Docker | Override the database file path/URL. Mount its parent directory and ensure it is writable. |
-| `SERVICEPULSE_MONITORING_ENABLED` | `true` | Set to `false` to disable scheduled checks; manual checks and history remain available. |
-| `SERVICEPULSE_MONITORING_POLLINTERVAL` | `30s` | Initial delay and delay between completed batches. |
-| `SERVICEPULSE_CHECK_CONNECTTIMEOUT` | `2s` | HTTP connection timeout. |
-| `SERVICEPULSE_CHECK_REQUESTTIMEOUT` | `5s` | HTTP response timeout. |
-| `SERVER_PORT` | `8080` | Internal application port; adjust the container side of the port mapping if changed. |
-
-For example, add `-e SERVICEPULSE_MONITORING_POLLINTERVAL=10s` to check more often.
-To use a different database name on the same volume, add
-`-e "SPRING_DATASOURCE_URL=jdbc:h2:file:/app/data/custom;DB_CLOSE_ON_EXIT=FALSE"`.
-The entire environment argument is quoted so the semicolon works in both shells.
-Local Maven/IDE runs still default to `./data/servicepulse` unless explicitly
-overridden. No local environment files or database files are copied into the image.
-
-### Check behaviour and volume persistence
-
-This PowerShell example registers the container's own fixed health endpoint, so
-manual and scheduled checks can be exercised without an external website:
-
-```powershell
-$registered = Invoke-RestMethod -Method Post -Uri http://localhost:8080/services -ContentType 'application/json' -Body '{"name":"Container health","url":"http://127.0.0.1:8080/health"}'
-Invoke-RestMethod -Method Post -Uri "http://localhost:8080/services/$($registered.id)/check"
-Invoke-RestMethod -Uri "http://localhost:8080/services/$($registered.id)/checks"
-Invoke-RestMethod -Uri "http://localhost:8080/services/$($registered.id)/stats"
-```
-
-The manual result should be UP with target HTTP status 200. After the configured
-polling interval, scheduled-check log entries appear and the stored check count
-increases without more manual requests. `127.0.0.1` in a registered URL refers to
-the container itself. To monitor an app running on the host with Docker Desktop,
-use `host.docker.internal` instead.
-
-Restart and, once startup completes, read the same service/history again:
-
-```sh
-docker restart -t 30 servicepulse
-```
-
-For a stronger check, replace the container while retaining the volume:
-
-```sh
-docker stop -t 30 servicepulse
-docker rm servicepulse
-docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:dev
-```
-
-Existing registrations and checks should still be present. Scheduled checks resume
-after startup, so history may grow; earlier records should remain. Use
-`docker stop -t 30 servicepulse` when finished. Keep the named volume to retain data.
-
-## Continuous integration (v0.6)
-
-The workflow at `.github/workflows/ci.yml` runs on pushes and pull requests. One
-Ubuntu 24.04 job checks out the code with read-only repository permission, sets up
-Temurin Java 21, restores Maven dependencies, and runs:
-
-```sh
-./mvnw --batch-mode --no-transfer-progress clean verify
-docker build --tag servicepulse:ci .
-```
-
-The Docker build is a later step and runs only when verification succeeds. CI then
-runs Docker runtime and volume persistence smoke tests (added in v0.6.1). It starts
-the container with port mapping `8080:8080` and a temporary named volume mounted at
-`/app/data`. Each startup has a 90-second readiness deadline: CI polls `/health`
-every two seconds, limits each request to two seconds, and requires HTTP `200` with
-the exact response bytes `UP`. An exited container fails immediately.
-
-CI registers a service, stops and removes the container, then starts a fresh
-container with the same volume. After readiness succeeds again, `GET /services`
-must contain the same service ID, name and URL. Scheduled monitoring is disabled
-for this smoke test to keep it deterministic. Failures print container logs; an
-`always()` cleanup step stops/removes the container and removes the temporary
-volume. The smoke-test step has a five-minute timeout, and cleanup errors also
-fail the job.
-
-Any test, image-build or smoke-test failure fails CI. The Maven cache key covers
-the POM and wrapper configuration; Docker's builder cache is separate. New runs
-cancel older runs for the same Git ref, and the job has a 20-minute timeout. The
-image stays on the runner; CI does not log into or publish to a container registry.
-No secrets or local Docker installation are required to run these checks in CI.
-The v0.7 smoke-test extension also checks `/actuator/health` after each container
-startup and requires an UP status. Existing health and volume checks are preserved.
-
-## Files and packages
-
-```text
-servicepulse/
-|-- .dockerignore
-|-- .github/workflows/ci.yml
-|-- Dockerfile
-|-- .gitattributes
-|-- .gitignore
-|-- .mvn/wrapper/maven-wrapper.properties
-|-- mvnw
-|-- mvnw.cmd
-|-- pom.xml
-|-- README.md
-`-- src/
-    |-- main/
-    |   |-- java/dev/taufeeqahmed/servicepulse/
-    |   |   |-- ServicePulseApplication.java
-    |   |   |-- health/HealthController.java
-    |   |   |-- checking/
-    |   |   |   |-- HealthStatus.java
-    |   |   |   |-- HealthCheckResponse.java
-    |   |   |   |-- HttpClientConfiguration.java
-    |   |   |   |-- ServiceCheckService.java
-    |   |   |   `-- ServiceCheckController.java
-    |   |   |-- history/
-    |   |   |   |-- HealthCheck.java
-    |   |   |   |-- HealthCheckRepository.java
-    |   |   |   |-- CheckHistoryResponse.java
-    |   |   |   |-- ServiceStatsResponse.java
-    |   |   |   |-- CheckHistoryService.java
-    |   |   |   `-- CheckHistoryController.java
-    |   |   |-- monitoring/
-    |   |   |   |-- MonitoringConfiguration.java
-    |   |   |   `-- ServiceMonitoringScheduler.java
-    |   |   |-- observability/ServicePulseMetrics.java
-    |   |   `-- registration/
-    |   |       |-- MonitoredService.java
-    |   |       |-- MonitoredServiceRepository.java
-    |   |       |-- ServiceRegistrationService.java
-    |   |       |-- ServiceRegistrationController.java
-    |   |       |-- CreateServiceRequest.java
-    |   |       |-- MonitoredServiceResponse.java
-    |   |       |-- HttpUrl.java
-    |   |       |-- HttpUrlValidator.java
-    |   |       `-- ServiceRegistrationExceptionHandler.java
-    |   `-- resources/application.properties
-    |-- test/resources/application-test.properties
-    `-- test/java/dev/taufeeqahmed/servicepulse/
-        |-- health/HealthControllerTest.java
-        |-- history/CheckHistoryControllerTest.java
-        |-- history/CheckHistoryPersistenceTest.java
-        |-- checking/ServiceCheckControllerTest.java
-        |-- checking/ServiceCheckServiceTest.java
-        |-- monitoring/MonitoringConfigurationTest.java
-        |-- monitoring/ServiceMonitoringSchedulerTest.java
-        |-- monitoring/ServiceMonitoringIntegrationTest.java
-        |-- observability/ActuatorEndpointsTest.java
-        |-- observability/ServicePulseMetricsTest.java
-        `-- registration/ServiceRegistrationControllerTest.java
-```
-
-| File | Purpose |
-| --- | --- |
-| `Dockerfile` | Builds the JAR with Java 21 and runs it on a non-root Java 21 JRE image with writable volume storage. |
-| `.dockerignore` | Limits Docker build inputs and excludes local data, environment files and generated output. |
-| `.github/workflows/ci.yml` | Verifies Java 21 tests, builds the Docker image, and checks fixed/Actuator health and H2 volume persistence on pushes and pull requests. |
-| `observability/ServicePulseMetrics.java` | Records counters and duration through Micrometer while isolating instrumentation failures. |
-| `ActuatorEndpointsTest.java` | Verifies endpoint exposure, Prometheus metric names/values, timer units and absence of custom tags. |
-| `ServicePulseMetricsTest.java` | Verifies registry, counter and timer failures cannot escape instrumentation or clear interruption. |
-| `pom.xml` | Pins Spring Boot 4.1.1, targets Java 21, declares dependencies, and configures executable JAR packaging. |
-| `ServicePulseApplication.java` | Starts Spring Boot. Its root package lets Spring discover components in subpackages. |
-| `health/HealthController.java` | Maps `GET /health` to the plain text response `UP`. |
-| `HealthControllerTest.java` | Verifies the endpoint through Spring's request handling with JUnit and MockMvc. |
-| `registration/MonitoredService.java` | JPA entity with an automatically generated ID, name, and URL. |
-| `registration/MonitoredServiceRepository.java` | Spring Data JPA persistence for registered services. |
-| `registration/ServiceRegistrationService.java` | Creates and lists services within database transactions. |
-| `registration/ServiceRegistrationController.java` | Exposes `POST /services` and `GET /services`, delegating to the service layer. |
-| `registration/CreateServiceRequest.java`, `registration/MonitoredServiceResponse.java` | Define the JSON input and output without exposing the JPA entity directly. |
-| `registration/HttpUrl.java`, `registration/HttpUrlValidator.java` | Validate HTTP/HTTPS URL syntax without making network requests. |
-| `registration/ServiceRegistrationExceptionHandler.java` | Returns clear validation and malformed-JSON error responses. |
-| `ServiceRegistrationControllerTest.java` | Tests registration, real persistence, listing, and invalid inputs. |
-| `checking/HealthStatus.java`, `checking/HealthCheckResponse.java` | Define the UP/DOWN values and check response fields; these are not JPA entities. |
-| `checking/HttpClientConfiguration.java` | Provides a reusable HTTP client with a connection timeout and redirects disabled. |
-| `checking/ServiceCheckService.java` | Loads a registration, performs the HTTP check, and passes one result to history persistence for both manual and scheduled callers. |
-| `checking/ServiceCheckController.java` | Exposes `POST /services/{id}/check` and maps missing services to 404. |
-| `ServiceCheckControllerTest.java` | Verifies checks against a controlled local HTTP server and real H2 registrations. |
-| `monitoring/MonitoringConfiguration.java` | Enables scheduling and registers the monitoring bean only when automatic monitoring is enabled. |
-| `monitoring/ServiceMonitoringScheduler.java` | Runs sequential batches through the existing check service, isolates failures, and prevents overlapping scheduled runs. |
-| `ServiceCheckServiceTest.java` | Verifies interrupted checks attempt to save their result and preserve the interrupt flag, even when persistence fails. |
-| `MonitoringConfigurationTest.java` | Tests configured intervals, actual scheduled callback registration, and disabling monitoring without waiting for timers. |
-| `ServiceMonitoringSchedulerTest.java` | Tests batch processing, failure recovery, overlap prevention and interruption with controlled mocks/latches. |
-| `ServiceMonitoringIntegrationTest.java` | Runs scheduled batches against real H2 registrations and a local server, verifying one saved result per service. |
-| `history/HealthCheck.java` | Check-history entity with a service foreign key and service/timestamp/ID index. |
-| `history/HealthCheckRepository.java` | Ordered history lookup and a single aggregate query for counts, average and latest timestamp. |
-| `history/CheckHistoryResponse.java`, `history/ServiceStatsResponse.java` | JSON history and statistics records without exposing JPA entities. |
-| `history/CheckHistoryService.java` | Writes results, loads history, computes percentages, and distinguishes missing services from empty history. |
-| `history/CheckHistoryController.java` | Exposes `GET /services/{id}/checks` and `GET /services/{id}/stats`. |
-| `CheckHistoryControllerTest.java` | Tests ordering, service isolation, stats, empty history, UTC timestamps and missing/invalid IDs. |
-| `CheckHistoryPersistenceTest.java` | Closes and reopens the app against a temporary H2 file to verify data survives restarts. |
-| `application-test.properties` | Isolates tests with in-memory H2 and a disposable schema. |
-| `application.properties` | Configures file-backed H2, schema updates, UTC JDBC timestamps, HTTP timeouts and scheduled monitoring. |
-| `mvnw`, `mvnw.cmd` | Official Maven wrapper scripts for Unix-like systems and Windows. |
-| `.mvn/wrapper/maven-wrapper.properties` | Pins the Maven version downloaded by the wrapper. |
-| `.gitignore` | Excludes build output, IDE settings, logs, local database files, and environment files. |
-| `.gitattributes` | Keeps appropriate line endings for the wrapper scripts. |
-| `README.md` | Setup, usage, and an explanation of the starter. |
-
-Code is grouped by feature under `dev.taufeeqahmed.servicepulse`: `health`,
-`registration`, `checking`, `monitoring`, `history`, and `observability`. Add future
-feature packages alongside them when needed.
-
-## Dependencies
-
-Spring Boot manages compatible dependency versions through its Maven parent.
-
-| Dependency | Why it is here |
-| --- | --- |
-| `spring-boot-starter-webmvc` | Spring Web MVC and embedded Tomcat for serving HTTP requests. This is the Spring MVC web starter for Spring Boot 4. |
-| `spring-boot-starter-data-jpa` | Spring Data repositories and Hibernate for storing registered services and check history. |
-| `spring-boot-starter-validation` | Jakarta Bean Validation for required fields, length limits, and HTTP/HTTPS URL validation. |
-| `spring-boot-starter-actuator` | Application health endpoints and Micrometer instrumentation support. |
-| `micrometer-registry-prometheus` | Exports metrics in Prometheus scrape format. |
-| `h2` (runtime) | An embedded database with file-backed development storage and isolated test databases. |
-| `spring-boot-starter-webmvc-test` (test) | Spring MVC testing support and Spring Boot's test starter, including JUnit Jupiter and MockMvc. |
-| `spring-boot-micrometer-metrics-test` (test) | Enables the real Prometheus registry in the endpoint integration test through `@AutoConfigureMetrics`; ordinary Spring Boot tests disable external registries. |
-
-H2 uses the local development username `sa` with an empty password. Hibernate
-maintains the `monitored_services` and `health_checks` tables. The development
-database now survives restarts; v0.1-v0.4 used an in-memory database. No additional
-dependencies or H2 browser console are introduced in v0.5.
+Thin controllers return DTOs. Manual requests and `ServiceMonitoringScheduler` share `ServiceCheckService`, reusing Java's HTTP client, `ServicePulseMetrics` and `CheckHistoryService`. Each check writes history once; database transactions exclude HTTP calls.
 
 ## Roadmap
 
-The v0.1-v0.6 releases are complete, including the v0.6.1 Docker runtime smoke-test
-patch. v0.7 adds observability only; alerts and deployment remain future work.
-
-| Milestone | Scope | Status |
-| --- | --- | --- |
-| v0.1 | Java 21 and Spring Boot foundation with a tested `GET /health` endpoint. | Complete (`v0.1.0`) |
-| v0.2 | Service registration API with validation and JPA storage. | Complete (`v0.2.0`) |
-| v0.3 | On-demand HTTP checks returning status, response time, and timestamp, with timeout handling. | Complete (`v0.3.0`) |
-| v0.4 | Configurable scheduled monitoring with failure isolation, overlap prevention and interruption handling. | Complete (`v0.4.0`) |
-| v0.5 | Persistent check history in H2, history API and uptime statistics for manual and scheduled checks. | Complete (`v0.5.0`) |
-| v0.6 | Docker packaging, persistent H2 volume support and automated verification/build/runtime smoke tests with GitHub Actions. | Complete (`v0.6.1`) |
-| v0.7 | Actuator health, Prometheus export and custom check/batch metrics. | Current (unreleased) |
-
-## Official references
-
-- [Spring Boot documentation](https://docs.spring.io/spring-boot/)
-- [Actuator endpoint exposure](https://docs.spring.io/spring-boot/reference/actuator/endpoints.html)
-- [Micrometer Prometheus registry](https://docs.micrometer.io/micrometer/reference/implementations/prometheus.html)
-- [Spring Boot testing](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
-- [Spring scheduling](https://docs.spring.io/spring-framework/reference/integration/scheduling.html)
-- [Spring Data JPA projections](https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html)
-- [Spring Data JPA transactions](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html)
-- [H2 database storage](https://h2database.com/html/features.html)
-- [Java 21 HTTP client](https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html)
-- [Java HTTP server for controlled tests](https://docs.oracle.com/en/java/javase/21/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html)
-- [Maven wrapper](https://maven.apache.org/tools/wrapper/)
-- [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
-- [Docker volumes](https://docs.docker.com/engine/storage/volumes/)
-- [Eclipse Temurin container images](https://github.com/adoptium/containers)
-- [GitHub Actions Java setup and caching](https://github.com/actions/setup-java)
-- [Eclipse Temurin JDK downloads](https://adoptium.net/temurin/releases/?version=21)
+| Release | Delivered |
+| --- | --- |
+| v0.1.0 | Foundation and health endpoint. |
+| v0.2.0 | Registration. |
+| v0.3.0 | Manual checks. |
+| v0.4.0 | Scheduling. |
+| v0.5.0 | History and uptime. |
+| v0.6.0–v0.6.1 | Docker, CI and smoke tests. |
+| **v0.7.0 — released** | Actuator and Prometheus. |
