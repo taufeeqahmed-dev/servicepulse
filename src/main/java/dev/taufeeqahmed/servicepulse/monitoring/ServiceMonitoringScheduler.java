@@ -3,6 +3,7 @@ package dev.taufeeqahmed.servicepulse.monitoring;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
+import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.slf4j.Logger;
@@ -16,11 +17,14 @@ public class ServiceMonitoringScheduler {
 
     private final MonitoredServiceRepository repository;
     private final ServiceCheckService checkService;
+    private final ServicePulseMetrics metrics;
     private final AtomicBoolean running = new AtomicBoolean();
 
-    public ServiceMonitoringScheduler(MonitoredServiceRepository repository, ServiceCheckService checkService) {
+    public ServiceMonitoringScheduler(MonitoredServiceRepository repository, ServiceCheckService checkService,
+            ServicePulseMetrics metrics) {
         this.repository = repository;
         this.checkService = checkService;
+        this.metrics = metrics;
     }
 
     @Scheduled(fixedDelayString = "${servicepulse.monitoring.poll-interval}",
@@ -32,6 +36,8 @@ public class ServiceMonitoringScheduler {
         }
 
         try {
+            // Count started batches, including empty or failed ones, after the overlap guard.
+            metrics.recordScheduledBatch();
             for (MonitoredService service : repository.findAll(Sort.by("id"))) {
                 if (Thread.currentThread().isInterrupted()) {
                     return;
