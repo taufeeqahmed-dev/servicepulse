@@ -2,7 +2,7 @@
 
 ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services. It combines manual and scheduled checks with persistent history, uptime statistics, and Actuator/Prometheus observability.
 
-**Current release: [v0.7.0](https://github.com/taufeeqahmed-dev/servicepulse/tree/v0.7.0) — released**
+**Current release: [v0.7.0](https://github.com/taufeeqahmed-dev/servicepulse/releases/tag/v0.7.0) — released**
 
 ## Features
 
