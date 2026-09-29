@@ -462,12 +462,26 @@ Temurin Java 21, restores Maven dependencies, and runs:
 docker build --tag servicepulse:ci .
 ```
 
-The Docker build is a later step and runs only when verification succeeds. A test
-or image-build failure fails the job. The Maven cache key covers the POM and wrapper
-configuration; Docker's builder cache is separate. New runs cancel older runs for
-the same Git ref, and the job has a 20-minute timeout. The image stays on the runner;
-CI does not log into or publish to a container registry. It builds the image but
-does not run the container smoke checks above. No secrets are required.
+The Docker build is a later step and runs only when verification succeeds. CI then
+runs Docker runtime and volume persistence smoke tests (added in v0.6.1). It starts
+the container with port mapping `8080:8080` and a temporary named volume mounted at
+`/app/data`. Each startup has a 90-second readiness deadline: CI polls `/health`
+every two seconds, limits each request to two seconds, and requires HTTP `200` with
+the exact response bytes `UP`. An exited container fails immediately.
+
+CI registers a service, stops and removes the container, then starts a fresh
+container with the same volume. After readiness succeeds again, `GET /services`
+must contain the same service ID, name and URL. Scheduled monitoring is disabled
+for this smoke test to keep it deterministic. Failures print container logs; an
+`always()` cleanup step stops/removes the container and removes the temporary
+volume. The smoke-test step has a five-minute timeout, and cleanup errors also
+fail the job.
+
+Any test, image-build or smoke-test failure fails CI. The Maven cache key covers
+the POM and wrapper configuration; Docker's builder cache is separate. New runs
+cancel older runs for the same Git ref, and the job has a 20-minute timeout. The
+image stays on the runner; CI does not log into or publish to a container registry.
+No secrets or local Docker installation are required to run these checks in CI.
 
 ## Files and packages
 
@@ -532,7 +546,7 @@ servicepulse/
 | --- | --- |
 | `Dockerfile` | Builds the JAR with Java 21 and runs it on a non-root Java 21 JRE image with writable volume storage. |
 | `.dockerignore` | Limits Docker build inputs and excludes local data, environment files and generated output. |
-| `.github/workflows/ci.yml` | Runs Java 21 verification and then builds the Docker image on pushes and pull requests. |
+| `.github/workflows/ci.yml` | Verifies Java 21 tests, builds the Docker image, and checks container health and H2 volume persistence on pushes and pull requests. |
 | `pom.xml` | Pins Spring Boot 4.1.1, targets Java 21, declares dependencies, and configures executable JAR packaging. |
 | `ServicePulseApplication.java` | Starts Spring Boot. Its root package lets Spring discover components in subpackages. |
 | `health/HealthController.java` | Maps `GET /health` to the plain text response `UP`. |
