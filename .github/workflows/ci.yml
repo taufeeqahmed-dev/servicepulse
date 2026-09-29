@@ -13,9 +13,12 @@ concurrency:
 
 jobs:
   verify:
-    name: Tests and Docker build
+    name: Tests, Docker build and runtime smoke tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      SMOKE_CONTAINER: servicepulse-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_VOLUME: servicepulse-smoke-data-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,3 +40,87 @@ jobs:
 
       - name: Build Docker image
         run: docker build --tag servicepulse:ci .
+
+      - name: Smoke test Docker runtime and volume persistence
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_until_ready() {
+            local deadline=$((SECONDS + 90))
+            local http_status="000"
+            local health_body="$RUNNER_TEMP/servicepulse-health.body"
+            while ((SECONDS < deadline)); do
+              if [[ "$(docker inspect --format '{{.State.Running}}' "$SMOKE_CONTAINER")" != "true" ]]; then
+                echo "ServicePulse exited before becoming ready." >&2
+                return 1
+              fi
+              if http_status=$(curl --silent --show-error --connect-timeout 1 --max-time 2 \
+                --output "$health_body" --write-out '%{http_code}' http://127.0.0.1:8080/health); then
+                if [[ "$http_status" == "200" ]] && cmp --silent <(printf 'UP') "$health_body"; then
+                  echo "GET /health returned HTTP 200 with the exact body UP."
+                  return 0
+                fi
+              fi
+              sleep 2
+            done
+            echo "ServicePulse did not become ready within 90 seconds (last HTTP status: $http_status)." >&2
+            return 1
+          }
+
+          start_container() {
+            docker run --detach --name "$SMOKE_CONTAINER" --publish 8080:8080 \
+              --mount "type=volume,source=$SMOKE_VOLUME,target=/app/data" \
+              --env SERVICEPULSE_MONITORING_ENABLED=false servicepulse:ci
+            wait_until_ready
+          }
+
+          docker volume create "$SMOKE_VOLUME"
+          start_container
+
+          created="$RUNNER_TEMP/servicepulse-created.json"
+          http_status=$(curl --silent --show-error --connect-timeout 2 --max-time 10 \
+            --request POST --header 'Content-Type: application/json' \
+            --data '{"name":"CI persistence smoke","url":"http://127.0.0.1:8080/health"}' \
+            --output "$created" --write-out '%{http_code}' http://127.0.0.1:8080/services)
+          [[ "$http_status" == "201" ]]
+          jq --exit-status '.id | numbers' "$created"
+
+          # A fresh container must load the registration from the same H2 volume.
+          docker stop --timeout 30 "$SMOKE_CONTAINER"
+          docker rm "$SMOKE_CONTAINER"
+          start_container
+
+          services="$RUNNER_TEMP/servicepulse-services.json"
+          http_status=$(curl --silent --show-error --connect-timeout 2 --max-time 10 \
+            --output "$services" --write-out '%{http_code}' http://127.0.0.1:8080/services)
+          [[ "$http_status" == "200" ]]
+          jq --exit-status --slurpfile created "$created" '
+            any(.[]; .id == $created[0].id
+              and .name == $created[0].name
+              and .url == $created[0].url)
+          ' "$services"
+          echo "Registration survived container replacement using the /app/data volume."
+
+      - name: Print container logs on failure
+        if: failure()
+        timeout-minutes: 1
+        run: |
+          if docker container inspect "$SMOKE_CONTAINER" > /dev/null 2>&1; then
+            docker logs "$SMOKE_CONTAINER"
+          fi
+
+      - name: Clean up smoke test container and volume
+        if: always()
+        timeout-minutes: 2
+        run: |
+          cleanup_status=0
+          if docker container inspect "$SMOKE_CONTAINER" > /dev/null 2>&1; then
+            docker stop --timeout 30 "$SMOKE_CONTAINER" || cleanup_status=1
+            docker rm --force "$SMOKE_CONTAINER" || cleanup_status=1
+          fi
+          if docker volume inspect "$SMOKE_VOLUME" > /dev/null 2>&1; then
+            docker volume rm "$SMOKE_VOLUME" || cleanup_status=1
+          fi
+          exit "$cleanup_status"
