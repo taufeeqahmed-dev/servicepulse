@@ -9,7 +9,7 @@ ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services.
 - Validated registration, HTTP checks, response times and UTC timestamps.
 - Persistent history, uptime statistics and threshold-based incidents.
 - Opening/recovery webhook attempts only after incident transitions commit.
-- **113 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
+- **132 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
 
 ## Tech stack
 
@@ -70,13 +70,13 @@ Call `POST /services/1/check`. Add an optional HTTP/HTTPS `webhookUrl` during re
 
 ## Scheduled monitoring
 
-Sequential batches default to a 30-second initial and fixed delay. Configure `servicepulse.monitoring.poll-interval`; disable with `servicepulse.monitoring.enabled=false`. Scheduled batches cannot overlap; manual checks may run concurrently. Both share incident detection and persistence.
+Sequential batches default to a 30-second initial and fixed delay. Configure `servicepulse.monitoring.poll-interval`; disable with `servicepulse.monitoring.enabled=false`. Scheduled batches cannot overlap within one scheduler instance; manual checks may run concurrently. Both share incident detection and persistence.
 
 ## History, uptime and incidents
 
 H2 persists data under `./data/`. Uptime is `UP / total × 100` per attempt; average response time includes failures/timeouts. With no checks, counts are zero and aggregate measurements are null.
 
-The default threshold is **three consecutive failures**; `1` is valid, zero/negative values are rejected. Repeated failures retain one OPEN incident. UP resets the streak and resolves it. Failed checks still record DOWN below the threshold.
+The default threshold is **three consecutive failures** when omitted or explicitly null. Supplied thresholds must be positive JSON integers within the Java integer range; `1` is valid, while fractional numbers, strings, zero and negative values are rejected. Repeated failures retain one OPEN incident. UP resets the streak and resolves it. Failed checks still record DOWN below the threshold.
 
 Streaks survive restarts. Per-service database locks serialize result processing. Incident start time is threshold detection time; resolved duration is derived from UTC timestamps. Existing registrations gain defaults without replaying history. Settings are supplied at registration; no editing/deletion API is provided.
 
@@ -88,7 +88,7 @@ Example opening payload:
 {"event":"INCIDENT_OPENED","incidentId":10,"serviceId":1,"serviceName":"Local API","status":"DOWN","startedAt":"2026-10-03T14:03:00Z","consecutiveFailures":3}
 ```
 
-Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data.
+Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit and persistence-resource release**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data. Interrupted health checks retain their monitoring result but do not start a webhook request.
 
 There are no retries or replay: network failures/process crashes can lose alerts, and concurrent deliveries may arrive out of order. Use trusted URLs; validation is not SSRF protection, private networks remain reachable, and payloads are unsigned.
 
@@ -121,7 +121,7 @@ The multi-stage Java 21 image runs **non-root**; `/app/data` preserves H2 across
 
 ## Architecture
 
-Thin controllers return DTOs. Manual requests and scheduling share `ServiceCheckService`. `CheckResultService` atomically records history and delegates lifecycle decisions to `IncidentService`. After-commit listeners handle webhooks and incident counters. Network calls stay outside database transactions.
+Thin controllers return DTOs. Manual requests and scheduling share `ServiceCheckService`. `CheckResultService` owns a short transaction that atomically records history and delegates lifecycle decisions to `IncidentService`; it rejects calls inside an existing transaction. After that transaction commits and releases its resources, the coordinator delivers the immutable transition snapshot. An after-commit listener updates incident counters. Network calls stay outside database transactions.
 
 ## Roadmap
 
