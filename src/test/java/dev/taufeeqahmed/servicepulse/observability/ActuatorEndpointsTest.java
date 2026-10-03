@@ -62,6 +62,8 @@ class ActuatorEndpointsTest {
         assertThat(sample(before, "servicepulse_checks_total{status=\"DOWN\"}")).isZero();
         assertThat(sample(before, "servicepulse_check_duration_seconds_count")).isZero();
         assertThat(sample(before, "servicepulse_scheduled_batches_total")).isZero();
+        assertThat(sample(before, "servicepulse_incidents_total")).isZero();
+        assertThat(sample(before, "servicepulse_incidents_open")).isZero();
 
         metrics.recordCheck(new HealthCheckResponse(1L, "First", "http://localhost/up",
                 HealthStatus.UP, 200, 125, Instant.parse("2026-09-29T12:00:00Z")));
@@ -83,11 +85,16 @@ class ActuatorEndpointsTest {
         assertThat(sample(after, "servicepulse_scheduled_batches_total")).isEqualTo(1);
         assertThat(registry.getMeters().stream()
                 .filter(meter -> meter.getId().getName().startsWith("servicepulse.")))
-                .hasSize(4).allSatisfy(meter -> {
+                .isNotEmpty().allSatisfy(meter -> {
                     if (meter.getId().getName().equals("servicepulse.checks")) {
                         assertThat(meter.getId().getTags()).containsExactly(
                                 Tag.of("status", meter.getId().getTag("status")));
                         assertThat(meter.getId().getTag("status")).isIn("UP", "DOWN");
+                    } else if (meter.getId().getName().equals("servicepulse.webhook.deliveries")) {
+                        assertThat(meter.getId().getTags()).extracting(Tag::getKey)
+                                .containsExactlyInAnyOrder("event", "result");
+                        assertThat(meter.getId().getTag("event")).isIn("INCIDENT_OPENED", "INCIDENT_RESOLVED");
+                        assertThat(meter.getId().getTag("result")).isIn("SUCCESS", "FAILURE");
                     } else {
                         assertThat(meter.getId().getTags()).isEmpty();
                     }

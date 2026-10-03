@@ -68,12 +68,35 @@ public class Incident {
         latestStatusCode = httpStatus;
     }
 
-    public Long getId() { return id; }
-    public MonitoredService getMonitoredService() { return monitoredService; }
-    public IncidentStatus getStatus() { return status; }
-    public Instant getStartedAt() { return startedAt; }
-    public Instant getResolvedAt() { return resolvedAt; }
-    public String getInitialFailureReason() { return initialFailureReason; }
-    public Integer getInitialStatusCode() { return initialStatusCode; }
-    public Integer getLatestStatusCode() { return latestStatusCode; }
+    public Long getId() {
+        return id;
+    }
+
+    public MonitoredService getMonitoredService() {
+        return monitoredService;
+    }
+
+    public IncidentStatus getStatus() {
+        return status;
+    }
+
+    public Instant getStartedAt() {
+        return startedAt;
+    }
+
+    public Instant getResolvedAt() {
+        return resolvedAt;
+    }
+
+    public String getInitialFailureReason() {
+        return initialFailureReason;
+    }
+
+    public Integer getInitialStatusCode() {
+        return initialStatusCode;
+    }
+
+    public Integer getLatestStatusCode() {
+        return latestStatusCode;
+    }
 }
