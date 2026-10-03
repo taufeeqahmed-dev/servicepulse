@@ -39,10 +39,13 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -183,15 +186,24 @@ class WebhookIntegrationTest {
     void webhookWaitsForCommitAndIsSuppressedOnRollback(boolean rollback) {
         var service = register(1, baseUrl + "/hook");
         double openings = openedCount();
-        new TransactionTemplate(transactions).executeWithoutResult(transaction -> {
-            results.record(service, new HealthCheckResponse(service.getId(), service.getName(), service.getUrl(),
-                    HealthStatus.DOWN, 503, 10, OPENED));
-            assertThat(received).isEmpty();
-            assertThat(openedCount()).isEqualTo(openings);
-            if (rollback) {
-                transaction.setRollbackOnly();
-            }
+        when(clock.instant()).thenAnswer(invocation -> {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void beforeCommit(boolean readOnly) {
+                    assertThat(received).isEmpty();
+                    assertThat(openedCount()).isEqualTo(openings);
+                    if (rollback) {
+                        throw new IllegalStateException("Abort before commit");
+                    }
+                }
+            });
+            return OPENED;
         });
+        if (rollback) {
+            assertThatThrownBy(() -> checking.check(service.getId()))
+                    .isInstanceOf(IllegalStateException.class).hasMessage("Abort before commit");
+        } else {
+            checking.check(service.getId()).orElseThrow();
+        }
         assertThat(received).hasSize(rollback ? 0 : 1);
         assertThat(incidents.count()).isEqualTo(rollback ? 0 : 1);
         assertThat(checks.count()).isEqualTo(rollback ? 0 : 1);

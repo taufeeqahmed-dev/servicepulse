@@ -32,6 +32,9 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.IllegalTransactionStateException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -145,14 +148,31 @@ class IncidentServiceTest {
     @Test
     void rollbackRestoresHistoryStreakAndIncidentAndDoesNotDeliverTransition() {
         var service = register(1);
-        new TransactionTemplate(transactions).executeWithoutResult(transaction -> {
-            record(service, 503);
-            assertThat(incidents.count()).isEqualTo(1);
-            assertThat(events.received).isEmpty();
-            transaction.setRollbackOnly();
+        when(clock.instant()).thenAnswer(invocation -> {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void beforeCommit(boolean readOnly) {
+                    assertThat(incidents.count()).isEqualTo(1);
+                    assertThat(events.received).isEmpty();
+                    throw new IllegalStateException("Abort before commit");
+                }
+            });
+            return OPENED;
         });
+        assertThatThrownBy(() -> record(service, 503)).isInstanceOf(IllegalStateException.class);
         assertThat(incidents.count()).isZero();
         assertThat(checks.count()).isZero();
+        assertThat(failures(service)).isZero();
+        assertThat(events.received).isEmpty();
+    }
+
+    @Test
+    void resultCoordinatorRejectsAnOuterTransactionBeforeWritingAnything() {
+        var service = register(1);
+        assertThatThrownBy(() -> new TransactionTemplate(transactions)
+                .executeWithoutResult(transaction -> record(service, 503)))
+                .isInstanceOf(IllegalTransactionStateException.class);
+        assertThat(checks.count()).isZero();
+        assertThat(incidents.count()).isZero();
         assertThat(failures(service)).isZero();
         assertThat(events.received).isEmpty();
     }

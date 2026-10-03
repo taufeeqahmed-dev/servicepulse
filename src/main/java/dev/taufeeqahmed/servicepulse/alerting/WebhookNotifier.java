@@ -14,8 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
 import tools.jackson.databind.ObjectMapper;
 
 @Component
@@ -38,8 +36,7 @@ public class WebhookNotifier {
         this.requestTimeout = requestTimeout;
     }
 
-    // No fallback execution: an event outside a transaction or from a rollback never sends a webhook.
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    // Called by the result coordinator only after its transaction has committed and released resources.
     public void notifyTransition(IncidentTransition transition) {
         if (transition.webhookUrl() == null) {
             return;

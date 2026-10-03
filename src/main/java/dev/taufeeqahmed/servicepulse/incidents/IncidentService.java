@@ -31,16 +31,16 @@ public class IncidentService {
 
     // Only the shared result recorder calls this, with the service row locked in its transaction.
     @Transactional(propagation = Propagation.MANDATORY)
-    public void accept(MonitoredService service, HealthCheckResponse result) {
+    public Optional<IncidentTransition> accept(MonitoredService service, HealthCheckResponse result) {
         var open = incidents.findByMonitoredService_IdAndStatus(service.getId(), IncidentStatus.OPEN);
         if (result.status() == HealthStatus.UP) {
             service.resetFailures();
-            open.ifPresent(incident -> {
+            return open.map(incident -> {
                 // Guard against a backwards wall-clock adjustment; check timestamps remain unchanged.
                 var now = clock.instant();
                 incident.resolve(now.isBefore(incident.getStartedAt()) ? incident.getStartedAt() : now,
                         result.httpStatus());
-                events.publishEvent(IncidentTransition.from(incident, IncidentTransition.Event.INCIDENT_RESOLVED));
+                return publish(IncidentTransition.from(incident, IncidentTransition.Event.INCIDENT_RESOLVED));
             });
         } else {
             service.recordFailure();
@@ -48,9 +48,15 @@ public class IncidentService {
                 open.get().continueOutage(result.httpStatus());
             } else if (service.getConsecutiveFailures() >= service.getFailureThreshold()) {
                 var incident = incidents.save(new Incident(service, clock.instant(), result.httpStatus()));
-                events.publishEvent(IncidentTransition.from(incident, IncidentTransition.Event.INCIDENT_OPENED));
+                return Optional.of(publish(IncidentTransition.from(incident, IncidentTransition.Event.INCIDENT_OPENED)));
             }
         }
+        return Optional.empty();
+    }
+
+    private IncidentTransition publish(IncidentTransition transition) {
+        events.publishEvent(transition);
+        return transition;
     }
 
     @Transactional(readOnly = true)
