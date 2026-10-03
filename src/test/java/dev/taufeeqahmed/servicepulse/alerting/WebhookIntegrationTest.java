@@ -48,6 +48,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.UnexpectedRollbackException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -225,16 +227,21 @@ class WebhookIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void webhookWaitsForCommitAndIsSuppressedOnRollback(boolean rollback) {
+    @ValueSource(strings = {"commit", "exception", "rollback-only"})
+    void webhookWaitsForCommitAndIsSuppressedOnRollback(String outcome) {
         var service = register(1, baseUrl + "/hook");
         double openings = openedCount();
+        boolean rollback = !outcome.equals("commit");
         when(clock.instant()).thenAnswer(invocation -> {
+            if (outcome.equals("rollback-only")) {
+                // Mark the participating lifecycle transaction rollback-only without throwing from its body.
+                TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            }
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override public void beforeCommit(boolean readOnly) {
                     assertThat(received).isEmpty();
                     assertThat(openedCount()).isEqualTo(openings);
-                    if (rollback) {
+                    if (outcome.equals("exception")) {
                         throw new IllegalStateException("Abort before commit");
                     }
                 }
@@ -243,7 +250,8 @@ class WebhookIntegrationTest {
         });
         if (rollback) {
             assertThatThrownBy(() -> checking.check(service.getId()))
-                    .isInstanceOf(IllegalStateException.class).hasMessage("Abort before commit");
+                    .isInstanceOf(outcome.equals("rollback-only")
+                            ? UnexpectedRollbackException.class : IllegalStateException.class);
         } else {
             checking.check(service.getId()).orElseThrow();
         }

@@ -14,13 +14,18 @@ import dev.taufeeqahmed.servicepulse.incidents.IncidentStatus;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.persistence.EntityManagerFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 
 @ActiveProfiles("test")
 @SpringBootTest(properties = {"servicepulse.monitoring.enabled=false", "servicepulse.webhook.request-timeout=10s",
@@ -35,9 +40,18 @@ class WebhookResourceReleaseTest {
     @Autowired private HealthCheckRepository checks;
     @Autowired private HikariDataSource dataSource;
     @Autowired private MeterRegistry metrics;
+    @Autowired private EntityManagerFactory entityManagerFactory;
+    @MockitoSpyBean private WebhookNotifier notifier;
 
     @Test
     void blockedWebhookDoesNotRetainTheOnlyDatabaseConnection() throws Exception {
+        doAnswer(invocation -> {
+            // Inspect the delivery thread, then execute the real network request.
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            assertThat(TransactionSynchronizationManager.hasResource(entityManagerFactory)).isFalse();
+            assertThat(TransactionSynchronizationManager.hasResource(dataSource)).isFalse();
+            return invocation.callRealMethod();
+        }).when(notifier).notifyTransition(any());
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

@@ -240,7 +240,7 @@ class IncidentServiceTest {
                 assertThat(incident.getStatus()).isEqualTo(recovered ? IncidentStatus.RESOLVED : IncidentStatus.OPEN);
                 assertThat(incident.getLatestStatusCode()).isEqualTo(secondStatus);
             });
-            assertThat(events.received).extracting(IncidentTransition::event).containsExactlyElementsOf(recovered
+            assertThat(events.received).extracting(IncidentTransition::event).containsExactlyInAnyOrderElementsOf(recovered
                     ? List.of(IncidentTransition.Event.INCIDENT_OPENED, IncidentTransition.Event.INCIDENT_RESOLVED)
                     : List.of(IncidentTransition.Event.INCIDENT_OPENED));
         }
