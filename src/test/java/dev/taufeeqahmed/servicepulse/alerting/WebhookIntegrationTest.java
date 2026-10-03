@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 import com.sun.net.httpserver.HttpServer;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
@@ -170,6 +171,57 @@ class WebhookIntegrationTest {
         assertThat(scrape).contains("servicepulse_incidents_total", "servicepulse_incidents_open 0.0",
                 "servicepulse_webhook_deliveries_total{event=\"INCIDENT_OPENED\",result=\"SUCCESS\"}");
         assertThat(scrape).doesNotContain(baseUrl, "Local API");
+    }
+
+    @Test
+    void scheduledRecoveryWaitsForConcurrentManualFailureToCommit() throws Exception {
+        var service = register(1, baseUrl + "/hook");
+        var locked = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var holdFirst = new AtomicBoolean(true);
+        double openings = openedCount();
+        double recoveries = deliveries("INCIDENT_RESOLVED", "SUCCESS");
+        when(clock.instant()).thenAnswer(invocation -> {
+            if (holdFirst.compareAndSet(true, false)) {
+                locked.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return OPENED;
+        });
+        var manual = executor.submit(() -> mvc.perform(post("/services/{id}/check", service.getId()))
+                .andExpect(status().isOk()));
+        try {
+            assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+            targetStatus.set(200);
+            var scheduled = executor.submit(() -> new ServiceMonitoringScheduler(services, checking, checkMetrics)
+                    .checkRegisteredServices());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            boolean blocked = false;
+            while (System.nanoTime() < deadline) {
+                blocked = jdbc.queryForObject("""
+                        select count(*) from information_schema.sessions
+                        where blocker_id is not null and lower(executing_statement) like '%monitored_services%'
+                        """, Integer.class) == 1;
+                if (blocked) { break; }
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+            assertThat(blocked).as("scheduled writer waits for the manual writer's parent lock").isTrue();
+            assertThat(scheduled.isDone()).isFalse();
+            assertThat(received).isEmpty();
+            release.countDown();
+            manual.get(5, TimeUnit.SECONDS);
+            scheduled.get(5, TimeUnit.SECONDS);
+            assertThat(checks.count()).isEqualTo(2);
+            assertThat(services.findById(service.getId()).orElseThrow().getConsecutiveFailures()).isZero();
+            assertThat(incidents.findAll()).singleElement()
+                    .satisfies(incident -> assertThat(incident.getStatus()).isEqualTo(IncidentStatus.RESOLVED));
+            assertThat(received).extracting(payload -> payload.get("event").asString())
+                    .containsExactlyInAnyOrder("INCIDENT_OPENED", "INCIDENT_RESOLVED");
+            assertThat(openedCount()).isEqualTo(openings + 1);
+            assertThat(deliveries("INCIDENT_RESOLVED", "SUCCESS")).isEqualTo(recoveries + 1);
+        } finally {
+            release.countDown();
+        }
     }
 
     @ParameterizedTest
