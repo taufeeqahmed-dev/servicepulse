@@ -103,6 +103,30 @@ class ServiceRegistrationControllerTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"2.9", "2.0", "2e0", "\"2\"", "\"\"", "2147483648", "-2147483649",
+            "999999999999999999999999999999999999999999"})
+    void rejectsNonIntegralOrOutOfRangeThresholdWithoutCoercion(String threshold) throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health","failureThreshold":%s}
+                                """.formatted(threshold)))
+                .andExpect(status().isBadRequest());
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void explicitNullThresholdRetainsTheDefault() throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health","failureThreshold":null}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.failureThreshold").value(3));
+        assertThat(repository.findAll()).singleElement()
+                .satisfies(service -> assertThat(service.getFailureThreshold()).isEqualTo(3));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"", " ", "ftp://example.com/hook", "not-a-url", "https:///hook"})
     void rejectsInvalidWebhookConfiguration(String webhook) throws Exception {
         String body = objectMapper.writeValueAsString(Map.of("name", "API", "url", "http://localhost/health",

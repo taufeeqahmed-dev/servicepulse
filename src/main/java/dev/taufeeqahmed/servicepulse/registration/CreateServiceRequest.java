@@ -4,6 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Pattern;
+import tools.jackson.databind.annotation.JsonDeserialize;
 
 public record CreateServiceRequest(
         @NotBlank(message = "name must not be blank")
@@ -16,6 +17,7 @@ public record CreateServiceRequest(
         String url,
 
         @Positive(message = "failureThreshold must be greater than zero")
+        @JsonDeserialize(using = FailureThresholdDeserializer.class)
         Integer failureThreshold,
 
         @Size(max = 2048, message = "webhookUrl must be at most 2048 characters")
