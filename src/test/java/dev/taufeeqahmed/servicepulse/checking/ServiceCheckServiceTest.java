@@ -22,6 +22,7 @@ import org.mockito.ArgumentMatchers;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -54,7 +55,7 @@ class ServiceCheckServiceTest {
             // Avoid carrying the HTTP interruption into the database transaction.
             assertThat(Thread.currentThread().isInterrupted()).isFalse();
             return null;
-        }).when(history).record(any(), any());
+        }).when(history).record(any(), any(), anyBoolean());
 
         try {
             var result = service.check(1L).orElseThrow();
@@ -62,7 +63,7 @@ class ServiceCheckServiceTest {
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
             assertThat(result.status()).isEqualTo(HealthStatus.DOWN);
             assertThat(result.httpStatus()).isNull();
-            verify(history).record(registered, result);
+            verify(history).record(registered, result, true);
             assertThat(registry.get("servicepulse.checks").tag("status", "DOWN").counter().count()).isEqualTo(1);
         } finally {
             // Do not leak the test's interrupt flag to JUnit or another test.
@@ -75,14 +76,14 @@ class ServiceCheckServiceTest {
         doAnswer(invocation -> {
             assertThat(Thread.currentThread().isInterrupted()).isFalse();
             throw new IllegalStateException("Simulated persistence failure");
-        }).when(history).record(any(), any());
+        }).when(history).record(any(), any(), anyBoolean());
 
         try {
             assertThatThrownBy(() -> service.check(1L))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("Simulated persistence failure");
             assertThat(Thread.currentThread().isInterrupted()).isTrue();
-            verify(history).record(any(), any());
+            verify(history).record(any(), any(), anyBoolean());
             assertThat(registry.get("servicepulse.checks").tag("status", "UP").counter().count()).isZero();
             assertThat(registry.get("servicepulse.checks").tag("status", "DOWN").counter().count()).isEqualTo(1);
             assertThat(registry.get("servicepulse.check.duration").timer().count()).isEqualTo(1);
@@ -113,7 +114,7 @@ class ServiceCheckServiceTest {
         assertThat(result.status()).isEqualTo(status);
         assertThat(result.httpStatus()).isEqualTo(httpStatus);
         verify(counter).increment();
-        verify(history).record(registered, result);
+        verify(history).record(registered, result, false);
         verify(failingRegistry, never()).counter("servicepulse.checks");
     }
 }

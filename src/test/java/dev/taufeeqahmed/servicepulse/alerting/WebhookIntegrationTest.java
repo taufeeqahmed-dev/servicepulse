@@ -10,6 +10,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.sun.net.httpserver.HttpServer;
 import dev.taufeeqahmed.servicepulse.checking.CheckResultService;
@@ -220,6 +222,47 @@ class WebhookIntegrationTest {
         assertThat(received).isEmpty();
         assertThat(deliveries("INCIDENT_OPENED", "SUCCESS")).isEqualTo(success);
         assertThat(deliveries("INCIDENT_OPENED", "FAILURE")).isEqualTo(failure);
+    }
+
+    @Test
+    void interruptedHealthRequestPersistsButDoesNotStartWebhookDelivery() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        server.createContext("/cancelled-target", exchange -> {
+            try (exchange) {
+                entered.countDown();
+                try { release.await(); }
+                catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+            }
+        });
+        var service = services.save(new MonitoredService("Cancelled", baseUrl + "/cancelled-target", 1,
+                baseUrl + "/hook"));
+        var worker = new AtomicReference<Thread>();
+        var interruptedOnReturn = new AtomicBoolean();
+        double openings = openedCount();
+        var attempt = executor.submit(() -> {
+            worker.set(Thread.currentThread());
+            try {
+                return checking.check(service.getId()).orElseThrow();
+            } finally {
+                interruptedOnReturn.set(Thread.currentThread().isInterrupted());
+            }
+        });
+        try {
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            worker.get().interrupt();
+            var result = attempt.get(2, TimeUnit.SECONDS);
+            assertThat(result.status()).isEqualTo(HealthStatus.DOWN);
+            assertThat(result.httpStatus()).isNull();
+            assertThat(interruptedOnReturn).isTrue();
+            assertThat(checks.count()).isEqualTo(1);
+            assertThat(services.findById(service.getId()).orElseThrow().getConsecutiveFailures()).isEqualTo(1);
+            assertThat(incidents.countByStatus(IncidentStatus.OPEN)).isEqualTo(1);
+            assertThat(openedCount()).isEqualTo(openings + 1);
+            assertThat(received).isEmpty();
+        } finally {
+            release.countDown();
+        }
     }
 
     @ParameterizedTest

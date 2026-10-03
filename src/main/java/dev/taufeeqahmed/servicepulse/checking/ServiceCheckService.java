@@ -75,7 +75,7 @@ public class ServiceCheckService {
             // Count completed HTTP attempts even if the following history write fails.
             metrics.recordCheck(result);
             // Both entry points write once, in a short transaction after the HTTP request.
-            results.record(service, result);
+            results.record(service, result, interrupted);
             return result;
         } finally {
             // Restore cancellation after recording the interrupted attempt, even if saving fails.

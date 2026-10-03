@@ -32,6 +32,11 @@ public class CheckResultService {
     // Own the transaction: joining an outer transaction would make delivery before its cleanup possible.
     @Transactional(propagation = Propagation.NEVER)
     public void record(MonitoredService service, HealthCheckResponse result) {
+        record(service, result, false);
+    }
+
+    @Transactional(propagation = Propagation.NEVER)
+    public void record(MonitoredService service, HealthCheckResponse result, boolean cancelled) {
         var transition = transaction.execute(status -> {
             // Lock the parent even when no incident exists, serializing all state transitions for this service.
             var locked = services.findByIdForUpdate(service.getId()).orElseThrow();
@@ -39,6 +44,10 @@ public class CheckResultService {
             return incidents.accept(locked, result);
         });
         // execute returns only after commit and resource cleanup; a rollback/failure never reaches delivery.
+        if (cancelled) {
+            // Persistence runs with cancellation cleared; restore it before any external side effect.
+            Thread.currentThread().interrupt();
+        }
         transition.ifPresent(webhooks::notifyTransition);
     }
 }
