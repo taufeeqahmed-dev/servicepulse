@@ -20,8 +20,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.sun.net.httpserver.HttpServer;
-import dev.taufeeqahmed.servicepulse.checking.CheckResultService;
-import dev.taufeeqahmed.servicepulse.checking.HealthCheckResponse;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
 import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
@@ -42,11 +40,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import tools.jackson.databind.JsonNode;
@@ -71,13 +69,12 @@ class WebhookIntegrationTest {
     @Autowired private MonitoredServiceRepository services;
     @Autowired private IncidentRepository incidents;
     @Autowired private HealthCheckRepository checks;
-    @Autowired private CheckResultService results;
     @Autowired private ServiceCheckService checking;
     @Autowired private ServicePulseMetrics checkMetrics;
     @Autowired private MeterRegistry metrics;
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper mapper;
-    @Autowired private PlatformTransactionManager transactions;
+    @Autowired private JdbcTemplate jdbc;
     @MockitoBean private Clock clock;
 
     private HttpServer server;
@@ -214,6 +211,50 @@ class WebhookIntegrationTest {
         assertThat(received).isEmpty();
         assertThat(deliveries("INCIDENT_OPENED", "SUCCESS")).isEqualTo(success);
         assertThat(deliveries("INCIDENT_OPENED", "FAILURE")).isEqualTo(failure);
+    }
+
+    @Test
+    void failedRecoveryFlushRollsBackStateHistoryAndDeliveryThenAllowsRecovery() {
+        var service = register(1, baseUrl + "/hook");
+        checking.check(service.getId()).orElseThrow();
+        targetStatus.set(500);
+        checking.check(service.getId()).orElseThrow();
+        long incidentId = incidents.findAll().getFirst().getId();
+        var historyIds = checks.findAll().stream().map(check -> check.getId()).toList();
+        double openings = openedCount();
+        double recoverySuccess = deliveries("INCIDENT_RESOLVED", "SUCCESS");
+        double recoveryFailure = deliveries("INCIDENT_RESOLVED", "FAILURE");
+        double upAttempts = metrics.get("servicepulse.checks").tag("status", "UP").counter().count();
+        // A real database constraint rejects the dirty incident UPDATE during the commit flush.
+        jdbc.execute("alter table incidents add constraint test_reject_recovery check (status = 'OPEN')");
+        targetStatus.set(200);
+        try {
+            assertThatThrownBy(() -> checking.check(service.getId())).isInstanceOf(DataIntegrityViolationException.class);
+            assertThat(incidents.findById(incidentId)).get().satisfies(incident -> {
+                assertThat(incident.getStatus()).isEqualTo(IncidentStatus.OPEN);
+                assertThat(incident.getResolvedAt()).isNull();
+                assertThat(incident.getInitialStatusCode()).isEqualTo(503);
+                assertThat(incident.getLatestStatusCode()).isEqualTo(500);
+            });
+            assertThat(services.findById(service.getId()).orElseThrow().getConsecutiveFailures()).isEqualTo(2);
+            assertThat(checks.findAll()).extracting(check -> check.getId()).containsExactlyElementsOf(historyIds);
+            assertThat(received).hasSize(1);
+            assertThat(openedCount()).isEqualTo(openings);
+            assertThat(metrics.get("servicepulse.incidents.open").gauge().value()).isEqualTo(1);
+            assertThat(deliveries("INCIDENT_RESOLVED", "SUCCESS")).isEqualTo(recoverySuccess);
+            assertThat(deliveries("INCIDENT_RESOLVED", "FAILURE")).isEqualTo(recoveryFailure);
+            // v0.7 check metrics count HTTP attempts even when the subsequent persistence fails.
+            assertThat(metrics.get("servicepulse.checks").tag("status", "UP").counter().count())
+                    .isEqualTo(upAttempts + 1);
+        } finally {
+            jdbc.execute("alter table incidents drop constraint test_reject_recovery");
+        }
+        checking.check(service.getId()).orElseThrow();
+        assertThat(incidents.findById(incidentId).orElseThrow().getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(services.findById(service.getId()).orElseThrow().getConsecutiveFailures()).isZero();
+        assertThat(checks.count()).isEqualTo(3);
+        assertThat(received).hasSize(2);
+        assertThat(deliveries("INCIDENT_RESOLVED", "SUCCESS")).isEqualTo(recoverySuccess + 1);
     }
 
     @Test
