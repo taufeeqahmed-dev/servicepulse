@@ -7,6 +7,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 import dev.taufeeqahmed.servicepulse.checking.CheckResultService;
 import dev.taufeeqahmed.servicepulse.checking.HealthCheckResponse;
@@ -19,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -26,6 +29,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -59,6 +63,7 @@ class IncidentServiceTest {
     @Autowired private PlatformTransactionManager transactions;
     @Autowired private CommittedEvents events;
     @Autowired private MockMvc mvc;
+    @Autowired private JdbcTemplate jdbc;
     @MockitoBean private Clock clock;
 
     @BeforeEach
@@ -177,18 +182,68 @@ class IncidentServiceTest {
         assertThat(events.received).isEmpty();
     }
 
-    @Test
-    void concurrentFailuresAndRecoveriesProduceOnlyOneOfEachTransition() throws Exception {
-        var service = register(1);
-        concurrently(() -> record(service, 503));
-        assertThat(incidents.count()).isEqualTo(1);
-        assertThat(failures(service)).isEqualTo(2);
-        concurrently(() -> record(service, 200));
-        assertThat(incidents.count()).isEqualTo(1);
-        assertThat(incidents.countByStatus(IncidentStatus.RESOLVED)).isEqualTo(1);
-        assertThat(events.received).extracting(IncidentTransition::event)
-                .containsExactly(IncidentTransition.Event.INCIDENT_OPENED, IncidentTransition.Event.INCIDENT_RESOLVED);
-        assertThat(checks.count()).isEqualTo(4);
+    @ParameterizedTest
+    @CsvSource({"false, 503", "true, 503", "false, 200", "true, 200"})
+    void contendingWritersObserveCommittedStateAfterCommitOrRollback(boolean rollback, int secondStatus)
+            throws Exception {
+        var service = register(2);
+        record(service, 503); // One failure below the threshold.
+        var locked = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var holdFirst = new AtomicBoolean(true);
+        when(clock.instant()).thenAnswer(invocation -> {
+            // Incident time is requested after the parent write lock and history insert, inside the transaction.
+            if (holdFirst.compareAndSet(true, false)) {
+                locked.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                if (rollback) {
+                    throw new IllegalStateException("Roll back the lock holder");
+                }
+            }
+            return OPENED;
+        });
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> record(service, 503));
+            try {
+                assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+                var second = executor.submit(() -> record(service, secondStatus));
+                awaitDatabaseLockWait();
+                assertThat(second.isDone()).isFalse();
+                assertThat(checks.count()).isEqualTo(1); // The first writer's insert is still uncommitted.
+                assertThat(events.received).isEmpty();
+                release.countDown();
+                if (rollback) {
+                    assertThatThrownBy(() -> first.get(5, TimeUnit.SECONDS))
+                            .hasCauseInstanceOf(IllegalStateException.class);
+                } else {
+                    first.get(5, TimeUnit.SECONDS);
+                }
+                second.get(5, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+        }
+        boolean recovered = secondStatus == 200;
+        assertThat(failures(service)).isEqualTo(recovered ? 0 : rollback ? 2 : 3);
+        assertThat(checks.count()).isEqualTo(rollback ? 2 : 3);
+        assertThat(checks.findByMonitoredService_IdOrderByCheckedAtDescIdDesc(service.getId()))
+                .extracting(check -> check.getStatus()).containsExactlyElementsOf(recovered
+                        ? rollback ? List.of(HealthStatus.UP, HealthStatus.DOWN)
+                                   : List.of(HealthStatus.UP, HealthStatus.DOWN, HealthStatus.DOWN)
+                        : rollback ? List.of(HealthStatus.DOWN, HealthStatus.DOWN)
+                                   : List.of(HealthStatus.DOWN, HealthStatus.DOWN, HealthStatus.DOWN));
+        if (rollback && recovered) {
+            assertThat(incidents.count()).isZero();
+            assertThat(events.received).isEmpty();
+        } else {
+            assertThat(incidents.findAll()).singleElement().satisfies(incident -> {
+                assertThat(incident.getStatus()).isEqualTo(recovered ? IncidentStatus.RESOLVED : IncidentStatus.OPEN);
+                assertThat(incident.getLatestStatusCode()).isEqualTo(secondStatus);
+            });
+            assertThat(events.received).extracting(IncidentTransition::event).containsExactlyElementsOf(recovered
+                    ? List.of(IncidentTransition.Event.INCIDENT_OPENED, IncidentTransition.Event.INCIDENT_RESOLVED)
+                    : List.of(IncidentTransition.Event.INCIDENT_OPENED));
+        }
     }
 
     @Test
@@ -258,26 +313,18 @@ class IncidentServiceTest {
                 httpStatus, 25, OPENED.minusSeconds(1)));
     }
 
-    private void concurrently(Runnable work) throws Exception {
-        var ready = new CountDownLatch(2);
-        var start = new CountDownLatch(1);
-        try (var executor = Executors.newFixedThreadPool(2)) {
-            var tasks = java.util.stream.IntStream.range(0, 2).mapToObj(i -> executor.submit(() -> {
-                ready.countDown();
-                try {
-                    assertThat(start.await(5, TimeUnit.SECONDS)).isTrue();
-                    work.run();
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    throw new AssertionError(exception);
-                }
-            })).toList();
-            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
-            start.countDown();
-            for (var task : tasks) {
-                task.get(10, TimeUnit.SECONDS);
+    private void awaitDatabaseLockWait() {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (jdbc.queryForObject("""
+                    select count(*) from information_schema.sessions
+                    where blocker_id is not null and lower(executing_statement) like '%monitored_services%'
+                    """, Integer.class) == 1) {
+                return;
             }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
         }
+        throw new AssertionError("The second writer never waited on the parent's database lock");
     }
 
     @TestConfiguration(proxyBeanMethods = false)
