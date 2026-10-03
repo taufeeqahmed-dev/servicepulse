@@ -1,14 +1,15 @@
 # ServicePulse
 
-ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services. It combines manual and scheduled checks with persistent history, uptime statistics, and Actuator/Prometheus observability.
+ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services. Manual and scheduled checks feed persistent history, uptime statistics, incident detection and optional webhook alerts, with Actuator/Prometheus observability.
 
-**Current release: [v0.7.0](https://github.com/taufeeqahmed-dev/servicepulse/releases/tag/v0.7.0) — released**
+**Current release: [v0.8.0 — Incident Detection & Webhook Alerting](https://github.com/taufeeqahmed-dev/servicepulse/releases/tag/v0.8.0).**
 
 ## Features
 
-- Validated service registration and HTTP checks with failure handling.
-- UP/DOWN results, response times, UTC timestamps and per-service uptime.
-- **73 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
+- Validated registration, HTTP checks, response times and UTC timestamps.
+- Persistent history, uptime statistics and threshold-based incidents.
+- Opening/recovery webhook attempts only after incident transitions commit.
+- **138 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
 
 ## Tech stack
 
@@ -16,20 +17,23 @@ Java 21 · Spring Boot · Spring Web · Spring Data JPA · H2 · Maven · JUnit/
 
 ## API
 
-Base URL: `http://localhost:8080`.
+Base URL: `http://localhost:8080`. Existing paths are unchanged; incident APIs use `/api`.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Fixed `200 OK` / `UP`. |
 | `POST /services` | Register a service; returns `201`. |
-| `GET /services` | List services. |
-| `POST /services/{id}/check` | Run and persist a check. |
-| `GET /services/{id}/checks` | History, newest first. |
+| `GET /services` | List services and configuration summary. |
+| `POST /services/{id}/check` | Run/persist a check and evaluate incidents. |
+| `GET /services/{id}/checks` | Check history, newest first. |
 | `GET /services/{id}/stats` | Counts, uptime and response-time statistics. |
+| `GET /api/incidents?status=OPEN` | Incident history; optional OPEN/RESOLVED filter. |
+| `GET /api/incidents/{id}` | Incident details and resolved duration. |
+| `GET /api/services/{serviceId}/incidents` | Service-specific incident history. |
 | `GET /actuator/health` | Application health. |
 | `GET /actuator/prometheus` | Prometheus metrics. |
 
-HTTP 200–399 means UP; other responses, timeouts and connection failures mean DOWN. Redirects are not followed. A completed check returns API `200` even for DOWN; `httpStatus` is null without an HTTP response. Invalid registration returns `400`; unknown service IDs return `404`.
+HTTP 200–399 means UP; other responses and connection failures/timeouts mean DOWN. Redirects are not followed. Completed checks return API `200` even for DOWN; `httpStatus` is null without a response. Invalid input returns `400`; unknown IDs return `404`.
 
 ## Quick start
 
@@ -38,57 +42,72 @@ Install JDK 21 and set `JAVA_HOME`:
 ```sh
 git clone https://github.com/taufeeqahmed-dev/servicepulse.git
 cd servicepulse
+git switch feature/v0.8-alerting-incidents
 ./mvnw clean verify
 ./mvnw spring-boot:run
 ```
 
-PowerShell: replace `./mvnw` with `.\mvnw.cmd`. For IDE use, open `pom.xml` with JDK 21.
+PowerShell: replace `./mvnw` with `.\mvnw.cmd`. Open `pom.xml` with JDK 21 in your IDE. Focused lifecycle/webhook tests use local HTTP servers:
+
+```sh
+./mvnw "-Dtest=IncidentServiceTest,WebhookIntegrationTest" test
+```
 
 ## Example
-
-Register a target:
 
 ```http
 POST /services
 Content-Type: application/json
 
-{"name":"Local API","url":"http://localhost:8080/health"}
+{"name":"Local API","url":"http://localhost:8080/health","failureThreshold":3}
 ```
-
-Call `POST /services/{returnedId}/check`. Example response:
 
 ```json
-{
-  "serviceId": 1,
-  "name": "Local API",
-  "url": "http://localhost:8080/health",
-  "status": "UP",
-  "httpStatus": 200,
-  "responseTimeMs": 12,
-  "checkedAt": "2026-09-29T15:00:00Z"
-}
+{"id":1,"name":"Local API","url":"http://localhost:8080/health","failureThreshold":3,"webhookConfigured":false}
 ```
+
+Call `POST /services/1/check`. Add an optional HTTP/HTTPS `webhookUrl` during registration for alerts; its value is not returned by the API.
 
 ## Scheduled monitoring
 
-Sequential batches run after an initial delay and a fixed delay between completed batches; both default to 30 seconds. Configure `servicepulse.monitoring.poll-interval`; disable with `servicepulse.monitoring.enabled=false`. Failures are isolated. Scheduled batches cannot overlap within one instance; manual checks may run concurrently.
+Sequential batches default to a 30-second initial and fixed delay. Configure `servicepulse.monitoring.poll-interval`; disable with `servicepulse.monitoring.enabled=false`. Scheduled batches cannot overlap within one scheduler instance; manual checks may run concurrently. Both share incident detection and persistence.
 
-## History and uptime
+## History, uptime and incidents
 
-H2 persists registrations and results under `./data/`. Statistics use database aggregates: uptime is `UP / total × 100` per attempt; average response time includes failures and timeouts. With no checks, counts are zero; uptime, average and latest timestamp are null.
+H2 persists data under `./data/`. Uptime is `UP / total × 100` per attempt; average response time includes failures/timeouts. With no checks, counts are zero and aggregate measurements are null.
+
+The default threshold is **three consecutive failures** when omitted or explicitly null. Supplied thresholds must be positive JSON integers within the Java integer range; `1` is valid, while fractional numbers, strings, zero and negative values are rejected. Repeated failures retain one OPEN incident. UP resets the streak and resolves it. Failed checks still record DOWN below the threshold.
+
+Streaks survive restarts. Per-service database locks serialize result processing. Incident start time is threshold detection time; resolved duration is derived from UTC timestamps. Existing registrations gain defaults without replaying history. Settings are supplied at registration; no editing/deletion API is provided.
+
+## Webhooks
+
+Example opening payload:
+
+```json
+{"event":"INCIDENT_OPENED","incidentId":10,"serviceId":1,"serviceName":"Local API","status":"DOWN","startedAt":"2026-10-03T14:03:00Z","consecutiveFailures":3}
+```
+
+Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit and persistence-resource release**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data. Caller cancellation suppresses webhook delivery and stops the scheduled batch after any in-flight recording finishes committing or rolling back. Interrupted HTTP attempts are still recorded.
+
+There are no retries or replay: network failures/process crashes can lose alerts, and concurrent deliveries may arrive out of order. Use trusted URLs; validation is not SSRF protection, private networks remain reachable, and payloads are unsigned.
+
+Scheduler failure logs contain service IDs and exception types, not exception messages or nested stack traces that could expose stored webhook credentials. Webhook delivery logs likewise omit URLs and exception text.
 
 ## Observability
 
 Only Actuator health and Prometheus are exposed; health details are hidden.
 
-| Metric | Measures |
+| Prometheus metric | Measures |
 | --- | --- |
-| `servicepulse_checks_total{status="UP"}` | UP checks. |
-| `servicepulse_checks_total{status="DOWN"}` | DOWN checks. |
-| `servicepulse_check_duration_seconds_*` | Duration: count, sum and max. |
+| `servicepulse_checks_total{status}` | UP/DOWN attempts; total is their sum. |
+| `servicepulse_check_duration_seconds_*` | Check duration count, sum and max. |
 | `servicepulse_scheduled_batches_total` | Started batches. |
+| `servicepulse_incidents_total` | Committed openings since startup. |
+| `servicepulse_incidents_open` | Database count, including after restart. |
+| `servicepulse_webhook_deliveries_total{event,result}` | Delivery outcomes. |
 
-Total checks are the sum of UP and DOWN; no independent total exists. The only custom check label is `status`. Metrics count attempts before persistence and reset on restart. Recording failures cannot stop monitoring but may lose samples. Prometheus/Grafana servers are not bundled.
+Webhook labels use `INCIDENT_OPENED`/`INCIDENT_RESOLVED` and `SUCCESS`/`FAILURE`. No service identities or URLs are labels. Counters reset on restart; check metrics precede persistence. Metric failures cannot interrupt monitoring. Prometheus/Grafana servers are not bundled.
 
 ## Docker and CI
 
@@ -98,13 +117,13 @@ docker volume create servicepulse-data
 docker run -d --name servicepulse -p 127.0.0.1:8080:8080 --mount "type=volume,source=servicepulse-data,target=/app/data" servicepulse:local
 ```
 
-The multi-stage Java 21 image runs **non-root**. Its named volume preserves H2 data under `/app/data`.
+The multi-stage Java 21 image runs **non-root**; `/app/data` preserves H2 across container replacement. Override the database location with `SPRING_DATASOURCE_URL`.
 
-[CI](.github/workflows/ci.yml) verifies tests before building Docker, checks application/Actuator health, and confirms registrations survive container replacement using the same volume.
+[CI](.github/workflows/ci.yml) verifies Maven tests, builds Docker, checks application/Actuator health and confirms registration persistence through a named volume. Webhook tests use no external services.
 
 ## Architecture
 
-Thin controllers return DTOs. Manual requests and `ServiceMonitoringScheduler` share `ServiceCheckService`, reusing Java's HTTP client, `ServicePulseMetrics` and `CheckHistoryService`. Each check writes history once; database transactions exclude HTTP calls.
+Thin controllers return DTOs. Manual requests and scheduling share `ServiceCheckService`. `CheckResultService` owns a short transaction that atomically records history and delegates lifecycle decisions to `IncidentService`; it rejects calls inside an existing transaction. One managed virtual-thread executor admits at most eight concurrent recordings; callers wait for admission and transaction cleanup, remembering interruption independently of the database worker. Cancellation and shutdown drain recordings without forcibly interrupting workers. After commit and resource release, the caller delivers the immutable transition snapshot unless cancelled. An after-commit listener updates incident counters. Network calls stay outside database transactions.
 
 ## Roadmap
 
@@ -116,4 +135,7 @@ Thin controllers return DTOs. Manual requests and `ServiceMonitoringScheduler` s
 | v0.4.0 | Scheduling. |
 | v0.5.0 | History and uptime. |
 | v0.6.0–v0.6.1 | Docker, CI and smoke tests. |
-| **v0.7.0 — released** | Actuator and Prometheus. |
+| v0.7.0 — released | Actuator and Prometheus. |
+| v0.8.0 — pending release | Incident detection and webhook alerts. |
+
+[Prepared v0.8.0 release notes](docs/releases/v0.8.0.md)

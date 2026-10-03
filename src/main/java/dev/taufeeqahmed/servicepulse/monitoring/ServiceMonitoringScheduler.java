@@ -51,11 +51,14 @@ public class ServiceMonitoringScheduler {
                             "Scheduled check: serviceId={}, status={}, httpStatus={}, responseTimeMs={}",
                             check.serviceId(), check.status(), check.httpStatus(), check.responseTimeMs()));
                 } catch (RuntimeException exception) {
-                    logger.warn("Scheduled check failed for service {}", service.getId(), exception);
+                    // Persistence causes can include row values, including webhook credentials.
+                    logger.warn("Scheduled check failed: serviceId={}, failureType={}",
+                            service.getId(), exception.getClass().getName());
                 }
             }
         } catch (RuntimeException exception) {
-            logger.error("Scheduled monitoring run failed; later runs will still execute", exception);
+            logger.error("Scheduled monitoring run failed; later runs will still execute: failureType={}",
+                    exception.getClass().getName());
         } finally {
             running.set(false);
         }

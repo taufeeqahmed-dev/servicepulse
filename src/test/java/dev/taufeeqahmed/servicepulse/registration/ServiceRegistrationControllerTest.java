@@ -56,6 +56,9 @@ class ServiceRegistrationControllerTest {
         assertThat(saved.getId()).isPositive();
         assertThat(saved.getName()).isEqualTo("OpenAI");
         assertThat(saved.getUrl()).isEqualTo("https://openai.com");
+        assertThat(saved.getFailureThreshold()).isEqualTo(3);
+        assertThat(saved.getConsecutiveFailures()).isZero();
+        assertThat(saved.getWebhookUrl()).isNull();
         assertThat(objectMapper.readTree(result.getResponse().getContentAsString())
                 .get("id").asLong()).isEqualTo(saved.getId());
     }
@@ -68,6 +71,70 @@ class ServiceRegistrationControllerTest {
                         .content(requestBody("Example", url)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.url").value(url));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 5})
+    void acceptsCustomFailureThresholdAndOptionalWebhook(int threshold) throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health",
+                                 "failureThreshold":%d,"webhookUrl":"https://example.com/hook?token=secret"}
+                                """.formatted(threshold)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.failureThreshold").value(threshold))
+                .andExpect(jsonPath("$.webhookConfigured").value(true))
+                .andExpect(jsonPath("$.webhookUrl").doesNotExist());
+        var saved = repository.findAll().getFirst();
+        assertThat(saved.getFailureThreshold()).isEqualTo(threshold);
+        assertThat(saved.getWebhookUrl()).isEqualTo("https://example.com/hook?token=secret");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1, Integer.MIN_VALUE})
+    void rejectsNonPositiveFailureThreshold(int threshold) throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health","failureThreshold":%d}
+                                """.formatted(threshold)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.failureThreshold").value("failureThreshold must be greater than zero"));
+        assertThat(repository.count()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"2.9", "2.0", "2e0", "\"2\"", "\"\"", "2147483648", "-2147483649",
+            "999999999999999999999999999999999999999999"})
+    void rejectsNonIntegralOrOutOfRangeThresholdWithoutCoercion(String threshold) throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health","failureThreshold":%s}
+                                """.formatted(threshold)))
+                .andExpect(status().isBadRequest());
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void explicitNullThresholdRetainsTheDefault() throws Exception {
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"API","url":"http://localhost/health","failureThreshold":null}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.failureThreshold").value(3));
+        assertThat(repository.findAll()).singleElement()
+                .satisfies(service -> assertThat(service.getFailureThreshold()).isEqualTo(3));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "ftp://example.com/hook", "not-a-url", "https:///hook"})
+    void rejectsInvalidWebhookConfiguration(String webhook) throws Exception {
+        String body = objectMapper.writeValueAsString(Map.of("name", "API", "url", "http://localhost/health",
+                "webhookUrl", webhook));
+        mockMvc.perform(post("/services").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.webhookUrl").isNotEmpty());
+        assertThat(repository.count()).isZero();
     }
 
     @Test

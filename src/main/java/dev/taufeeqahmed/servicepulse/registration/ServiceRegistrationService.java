@@ -17,7 +17,8 @@ public class ServiceRegistrationService {
 
     @Transactional
     public MonitoredServiceResponse create(CreateServiceRequest request) {
-        MonitoredService service = repository.save(new MonitoredService(request.name(), request.url()));
+        MonitoredService service = repository.save(new MonitoredService(request.name(), request.url(),
+                request.failureThreshold() == null ? 3 : request.failureThreshold(), request.webhookUrl()));
         return MonitoredServiceResponse.from(service);
     }
 

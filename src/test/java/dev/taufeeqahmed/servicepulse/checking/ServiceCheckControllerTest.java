@@ -15,6 +15,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.micrometer.core.instrument.MeterRegistry;
 import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
+import dev.taufeeqahmed.servicepulse.incidents.IncidentRepository;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -63,6 +64,9 @@ class ServiceCheckControllerTest {
     private HealthCheckRepository checks;
 
     @Autowired
+    private IncidentRepository incidents;
+
+    @Autowired
     private MeterRegistry metrics;
 
     private HttpServer server;
@@ -70,6 +74,7 @@ class ServiceCheckControllerTest {
 
     @BeforeEach
     void setUp() throws IOException {
+        incidents.deleteAll();
         checks.deleteAll();
         repository.deleteAll();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -85,6 +90,7 @@ class ServiceCheckControllerTest {
         }
         executor.shutdownNow();
         executor.awaitTermination(5, TimeUnit.SECONDS);
+        incidents.deleteAll();
         checks.deleteAll();
         repository.deleteAll();
     }

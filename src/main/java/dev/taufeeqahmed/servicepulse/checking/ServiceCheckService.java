@@ -11,7 +11,6 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import dev.taufeeqahmed.servicepulse.history.CheckHistoryService;
 import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
@@ -23,19 +22,19 @@ public class ServiceCheckService {
 
     private final MonitoredServiceRepository repository;
     private final HttpClient httpClient;
-    private final CheckHistoryService history;
+    private final CheckResultService results;
     private final ServicePulseMetrics metrics;
     private final Duration requestTimeout;
 
     public ServiceCheckService(MonitoredServiceRepository repository, HttpClient httpClient,
-            CheckHistoryService history, ServicePulseMetrics metrics,
+            CheckResultService results, ServicePulseMetrics metrics,
             @Value("${servicepulse.check.request-timeout}") Duration requestTimeout) {
         if (requestTimeout.isZero() || requestTimeout.isNegative()) {
             throw new IllegalArgumentException("Request timeout must be positive.");
         }
         this.repository = repository;
         this.httpClient = httpClient;
-        this.history = history;
+        this.results = results;
         this.metrics = metrics;
         this.requestTimeout = requestTimeout;
     }
@@ -76,7 +75,7 @@ public class ServiceCheckService {
             // Count completed HTTP attempts even if the following history write fails.
             metrics.recordCheck(result);
             // Both entry points write once, in a short transaction after the HTTP request.
-            history.record(service, result);
+            results.record(service, result, interrupted);
             return result;
         } finally {
             // Restore cancellation after recording the interrupted attempt, even if saving fails.
