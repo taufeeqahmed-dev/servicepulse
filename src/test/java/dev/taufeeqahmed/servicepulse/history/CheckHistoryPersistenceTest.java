@@ -7,6 +7,9 @@ import java.time.Instant;
 import dev.taufeeqahmed.servicepulse.ServicePulseApplication;
 import dev.taufeeqahmed.servicepulse.checking.HealthCheckResponse;
 import dev.taufeeqahmed.servicepulse.checking.HealthStatus;
+import dev.taufeeqahmed.servicepulse.checking.CheckResultService;
+import dev.taufeeqahmed.servicepulse.incidents.IncidentRepository;
+import dev.taufeeqahmed.servicepulse.incidents.IncidentStatus;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
 import org.junit.jupiter.api.Test;
@@ -75,6 +78,50 @@ class CheckHistoryPersistenceTest {
             assertThat(stats.totalChecks()).isEqualTo(1);
             assertThat(stats.uptimePercentage()).isEqualByComparingTo("100.00");
         }
+    }
+
+    @Test
+    void retainsFailureStreakAndIncidentLifecycleAcrossRestarts() {
+        Path database = directory.resolve("incidents");
+        long serviceId;
+        long incidentId;
+        try (var first = start(database)) {
+            var service = first.getBean(MonitoredServiceRepository.class)
+                    .save(new MonitoredService("Persistent", "http://localhost/health"));
+            serviceId = service.getId();
+            record(first, serviceId, HealthStatus.DOWN);
+            record(first, serviceId, HealthStatus.DOWN);
+            assertThat(first.getBean(IncidentRepository.class).count()).isZero();
+        }
+        try (var second = start(database)) {
+            assertThat(second.getBean(MonitoredServiceRepository.class).findById(serviceId).orElseThrow()
+                    .getConsecutiveFailures()).isEqualTo(2);
+            record(second, serviceId, HealthStatus.DOWN);
+            var incident = second.getBean(IncidentRepository.class).findAll().getFirst();
+            assertThat(incident.getStatus()).isEqualTo(IncidentStatus.OPEN);
+            incidentId = incident.getId();
+        }
+        try (var third = start(database)) {
+            record(third, serviceId, HealthStatus.DOWN);
+            assertThat(third.getBean(IncidentRepository.class).count()).isEqualTo(1);
+            record(third, serviceId, HealthStatus.UP);
+        }
+        try (var fourth = start(database)) {
+            assertThat(fourth.getBean(IncidentRepository.class).findById(incidentId)).get().satisfies(incident -> {
+                assertThat(incident.getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+                assertThat(incident.getResolvedAt()).isAfterOrEqualTo(incident.getStartedAt());
+            });
+            assertThat(fourth.getBean(MonitoredServiceRepository.class).findById(serviceId).orElseThrow()
+                    .getConsecutiveFailures()).isZero();
+            assertThat(fourth.getBean(CheckHistoryService.class).history(serviceId).orElseThrow()).hasSize(5);
+        }
+    }
+
+    private void record(ConfigurableApplicationContext context, long serviceId, HealthStatus status) {
+        var service = context.getBean(MonitoredServiceRepository.class).findById(serviceId).orElseThrow();
+        context.getBean(CheckResultService.class).record(service,
+                new HealthCheckResponse(serviceId, service.getName(), service.getUrl(), status,
+                        status == HealthStatus.UP ? 200 : 503, 10, Instant.now()));
     }
 
     private ConfigurableApplicationContext start(Path database) {

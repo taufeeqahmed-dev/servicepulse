@@ -7,7 +7,6 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Optional;
 
-import dev.taufeeqahmed.servicepulse.history.CheckHistoryService;
 import dev.taufeeqahmed.servicepulse.observability.ServicePulseMetrics;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredService;
 import dev.taufeeqahmed.servicepulse.registration.MonitoredServiceRepository;
@@ -34,7 +33,7 @@ import static org.mockito.Mockito.when;
 class ServiceCheckServiceTest {
 
     private final MonitoredService registered = new MonitoredService("Local API", "http://localhost/health");
-    private final CheckHistoryService history = mock(CheckHistoryService.class);
+    private final CheckResultService history = mock(CheckResultService.class);
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final MonitoredServiceRepository repository = mock(MonitoredServiceRepository.class);
     private final HttpClient httpClient = mock(HttpClient.class);
