@@ -2,7 +2,7 @@
 
 ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services. Manual and scheduled checks feed persistent history, uptime statistics, incident detection and optional webhook alerts, with Actuator/Prometheus observability.
 
-**Current release: [v0.7.0](https://github.com/taufeeqahmed-dev/servicepulse/releases/tag/v0.7.0).** This branch implements **v0.8.0 — Incident Detection & Webhook Alerting**, pending release.
+**Current release: [v0.8.0 — Incident Detection & Webhook Alerting](https://github.com/taufeeqahmed-dev/servicepulse/releases/tag/v0.8.0).**
 
 ## Features
 
