@@ -5,11 +5,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import javax.sql.DataSource;
 
 import com.sun.net.httpserver.HttpServer;
+import com.zaxxer.hikari.HikariDataSource;
 import dev.taufeeqahmed.servicepulse.checking.ServiceCheckService;
 import dev.taufeeqahmed.servicepulse.history.HealthCheckRepository;
 import dev.taufeeqahmed.servicepulse.incidents.IncidentRepository;
@@ -21,6 +23,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -118,17 +122,70 @@ class ServiceMonitoringFailureIntegrationTest {
                 "failureType=org.springframework.dao.");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void callerCancellationSurvivesLockWaitAndStopsBatchAfterCommitOrRollback(boolean lockTimesOut,
+            CapturedOutput output) throws Exception {
+        var caller = new AtomicReference<Thread>();
+        try (var holder = dataSource.getConnection()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("select * from monitored_services where id=? for update")) {
+                lock.setLong(1, first.getId());
+                lock.executeQuery().close();
+                var batch = executor.submit(() -> {
+                    caller.set(Thread.currentThread());
+                    new ServiceMonitoringScheduler(services, checking, metrics).checkRegisteredServices();
+                    return Thread.currentThread().isInterrupted();
+                });
+                awaitDatabaseLockWait();
+                caller.get().interrupt();
+                // The caller must consume/remember cancellation and still await persistence cleanup.
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+                while (System.nanoTime() < deadline && !batch.isDone()
+                        && (caller.get().isInterrupted() || caller.get().getState() != Thread.State.WAITING)) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                }
+                assertThat(batch.isDone()).isFalse();
+                assertThat(caller.get().isInterrupted()).isFalse();
+                assertThat(caller.get().getState()).isEqualTo(Thread.State.WAITING);
+                assertThat(databaseLockWaiters()).isEqualTo(1);
+                assertThat(nextRequests).hasValue(0);
+                assertThat(webhooks).hasValue(0);
+                if (!lockTimesOut) {
+                    holder.rollback(); // Let the already-started recording commit normally.
+                }
+                assertThat(batch.get(8, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(dataSource.unwrap(HikariDataSource.class).getHikariPoolMXBean().getActiveConnections()).isZero();
+        assertThat(firstRequests).hasValue(1);
+        assertThat(nextRequests).hasValue(0);
+        assertThat(webhooks).hasValue(0);
+        assertThat(checks.count()).isEqualTo(lockTimesOut ? 0 : 1);
+        assertThat(incidents.count()).isEqualTo(lockTimesOut ? 0 : 1);
+        assertThat(services.findById(first.getId()).orElseThrow().getConsecutiveFailures())
+                .isEqualTo(lockTimesOut ? 0 : 1);
+        assertThat(services.findById(next.getId()).orElseThrow().getConsecutiveFailures()).isZero();
+        assertThat(output.getAll()).doesNotContain(SECRET, webhookUrl, "Map entry <", "MVStoreException");
+    }
+
     private void awaitDatabaseLockWait() {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
-            if (jdbc.queryForObject("""
-                    select count(*) from information_schema.sessions
-                    where blocker_id is not null and lower(executing_statement) like '%monitored_services%'
-                    """, Integer.class) == 1) {
+            if (databaseLockWaiters() == 1) {
                 return;
             }
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
         }
         throw new AssertionError("The scheduled writer never waited on the service database lock");
+    }
+
+    private int databaseLockWaiters() {
+        return jdbc.queryForObject("""
+                select count(*) from information_schema.sessions
+                where blocker_id is not null and lower(executing_statement) like '%monitored_services%'
+                """, Integer.class);
     }
 }

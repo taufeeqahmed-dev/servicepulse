@@ -9,7 +9,7 @@ ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services.
 - Validated registration, HTTP checks, response times and UTC timestamps.
 - Persistent history, uptime statistics and threshold-based incidents.
 - Opening/recovery webhook attempts only after incident transitions commit.
-- **133 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
+- **138 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
 
 ## Tech stack
 
@@ -88,7 +88,7 @@ Example opening payload:
 {"event":"INCIDENT_OPENED","incidentId":10,"serviceId":1,"serviceName":"Local API","status":"DOWN","startedAt":"2026-10-03T14:03:00Z","consecutiveFailures":3}
 ```
 
-Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit and persistence-resource release**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data. Interrupted health checks retain their monitoring result but do not start a webhook request.
+Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit and persistence-resource release**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data. Caller cancellation suppresses webhook delivery and stops the scheduled batch after any in-flight recording finishes committing or rolling back. Interrupted HTTP attempts are still recorded.
 
 There are no retries or replay: network failures/process crashes can lose alerts, and concurrent deliveries may arrive out of order. Use trusted URLs; validation is not SSRF protection, private networks remain reachable, and payloads are unsigned.
 
@@ -123,7 +123,7 @@ The multi-stage Java 21 image runs **non-root**; `/app/data` preserves H2 across
 
 ## Architecture
 
-Thin controllers return DTOs. Manual requests and scheduling share `ServiceCheckService`. `CheckResultService` owns a short transaction that atomically records history and delegates lifecycle decisions to `IncidentService`; it rejects calls inside an existing transaction. After that transaction commits and releases its resources, the coordinator delivers the immutable transition snapshot. An after-commit listener updates incident counters. Network calls stay outside database transactions.
+Thin controllers return DTOs. Manual requests and scheduling share `ServiceCheckService`. `CheckResultService` owns a short transaction that atomically records history and delegates lifecycle decisions to `IncidentService`; it rejects calls inside an existing transaction. One managed virtual-thread executor admits at most eight concurrent recordings; callers wait for admission and transaction cleanup, remembering interruption independently of the database worker. Cancellation and shutdown drain recordings without forcibly interrupting workers. After commit and resource release, the caller delivers the immutable transition snapshot unless cancelled. An after-commit listener updates incident counters. Network calls stay outside database transactions.
 
 ## Roadmap
 
