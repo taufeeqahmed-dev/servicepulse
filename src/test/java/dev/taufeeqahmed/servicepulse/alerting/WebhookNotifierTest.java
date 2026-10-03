@@ -24,6 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class WebhookNotifierTest {
@@ -96,6 +97,7 @@ class WebhookNotifierTest {
         assertThat(request.getValue().timeout()).contains(Duration.ofSeconds(3));
         assertThat(request.getValue().headers().firstValue("Content-Type")).contains("application/json");
         verify(body).close();
+        verifyNoMoreInteractions(body);
         verify(metrics).recordWebhookDelivery(event.event(), httpStatus >= 200 && httpStatus < 300);
     }
 }

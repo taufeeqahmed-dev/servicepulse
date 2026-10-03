@@ -1,6 +1,12 @@
 package dev.taufeeqahmed.servicepulse.alerting;
 
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -81,7 +87,6 @@ class WebhookIntegrationTest {
     private final AtomicInteger webhookStatus = new AtomicInteger(204);
     private final List<JsonNode> received = new CopyOnWriteArrayList<>();
     private final List<IncidentStatus> committedStates = new CopyOnWriteArrayList<>();
-    private CountDownLatch webhookGate;
 
     @BeforeEach
     void start() throws Exception {
@@ -103,16 +108,6 @@ class WebhookIntegrationTest {
                 received.add(payload);
                 // The receiver uses a different thread/connection: it must see committed incident state.
                 committedStates.add(incidents.findById(payload.get("incidentId").asLong()).orElseThrow().getStatus());
-                if (webhookGate != null) {
-                    try {
-                        if (!webhookGate.await(5, TimeUnit.SECONDS)) {
-                            return;
-                        }
-                    } catch (InterruptedException exception) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
                 exchange.getResponseHeaders().add("Location", baseUrl + "/hook");
                 exchange.sendResponseHeaders(webhookStatus.get(), -1);
             }
@@ -123,9 +118,6 @@ class WebhookIntegrationTest {
 
     @AfterEach
     void stop() throws Exception {
-        if (webhookGate != null) {
-            webhookGate.countDown();
-        }
         server.stop(0);
         executor.shutdownNow();
         assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
@@ -285,16 +277,74 @@ class WebhookIntegrationTest {
     }
 
     @Test
-    void webhookTimeoutLeavesIncidentAndHistoryCommitted() {
-        webhookGate = new CountDownLatch(1);
-        var service = register(1, baseUrl + "/hook");
-        double failures = deliveries("INCIDENT_OPENED", "FAILURE");
-        assertThat(checking.check(service.getId()).orElseThrow().status()).isEqualTo(HealthStatus.DOWN);
-        assertThat(received).hasSize(1);
-        assertThat(checks.count()).isEqualTo(1);
-        assertThat(incidents.countByStatus(IncidentStatus.OPEN)).isEqualTo(1);
-        assertThat(deliveries("INCIDENT_OPENED", "FAILURE")).isEqualTo(failures + 1);
-        webhookGate.countDown();
+    void webhookTimeoutCancelsConnectionWithoutRemoteClosure() throws Exception {
+        assertWebhookClosesConnection(false);
+    }
+
+    @Test
+    void webhookClosesStalledResponseBodyWithoutReadingIt() throws Exception {
+        assertWebhookClosesConnection(true);
+    }
+
+    private void assertWebhookClosesConnection(boolean sendHeaders) throws Exception {
+        var arrived = new CountDownLatch(1);
+        var accepted = new AtomicReference<Socket>();
+        try (var listener = new ServerSocket()) {
+            listener.bind(new InetSocketAddress("127.0.0.1", 0));
+            var disconnected = executor.submit(() -> {
+                try (var socket = listener.accept()) {
+                    accepted.set(socket);
+                    readWebhookRequest(socket.getInputStream());
+                    if (sendHeaders) {
+                        socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                                .getBytes(StandardCharsets.US_ASCII));
+                        socket.getOutputStream().flush();
+                    }
+                    arrived.countDown();
+                    // Never send a body, close the server connection, or impose a server-side timeout.
+                    // EOF must come from client cancellation/response-stream closure.
+                    return socket.getInputStream().read();
+                }
+            });
+            var service = register(1, "http://127.0.0.1:" + listener.getLocalPort() + "/hook");
+            String outcome = sendHeaders ? "SUCCESS" : "FAILURE";
+            double before = deliveries("INCIDENT_OPENED", outcome);
+            long started = System.nanoTime();
+            var attempt = executor.submit(() -> checking.check(service.getId()).orElseThrow());
+            try {
+                assertThat(arrived.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(attempt.get(2, TimeUnit.SECONDS).status()).isEqualTo(HealthStatus.DOWN);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertThat(elapsed).isLessThan(3_000);
+                if (!sendHeaders) {
+                    assertThat(elapsed).isGreaterThanOrEqualTo(750); // Configured client timeout is one second.
+                }
+                assertThat(disconnected.get(1, TimeUnit.SECONDS)).isEqualTo(-1);
+                assertThat(checks.count()).isEqualTo(1);
+                assertThat(incidents.countByStatus(IncidentStatus.OPEN)).isEqualTo(1);
+                assertThat(deliveries("INCIDENT_OPENED", outcome)).isEqualTo(before + 1);
+            } finally {
+                if (accepted.get() != null) {
+                    accepted.get().close();
+                }
+                attempt.cancel(true);
+            }
+        }
+    }
+
+    private static void readWebhookRequest(InputStream input) throws IOException {
+        var header = new ByteArrayOutputStream();
+        while (!header.toString(StandardCharsets.US_ASCII).endsWith("\r\n\r\n")) {
+            int next = input.read();
+            if (next < 0 || header.size() > 16_384) {
+                throw new IOException("Incomplete webhook request headers");
+            }
+            header.write(next);
+        }
+        int length = header.toString(StandardCharsets.US_ASCII).lines()
+                .filter(line -> line.regionMatches(true, 0, "Content-Length:", 0, 15))
+                .mapToInt(line -> Integer.parseInt(line.substring(15).trim())).findFirst().orElseThrow();
+        assertThat(input.readNBytes(length)).hasSize(length);
     }
 
     private MonitoredService register(int threshold, String webhook) {
