@@ -9,7 +9,7 @@ ServicePulse is a Java 21 and Spring Boot REST API for monitoring HTTP services.
 - Validated registration, HTTP checks, response times and UTC timestamps.
 - Persistent history, uptime statistics and threshold-based incidents.
 - Opening/recovery webhook attempts only after incident transitions commit.
-- **132 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
+- **133 automated tests**, plus Docker runtime and volume-persistence smoke tests in GitHub Actions.
 
 ## Tech stack
 
@@ -91,6 +91,8 @@ Example opening payload:
 Recovery sends `INCIDENT_RESOLVED`, `status: UP`, `resolvedAt` and `durationSeconds`. Delivery is synchronous **after commit and persistence-resource release**, bounded by `servicepulse.webhook.request-timeout` (default `3s`), and successful only for HTTP 2xx. Errors cannot roll back monitoring data. Interrupted health checks retain their monitoring result but do not start a webhook request.
 
 There are no retries or replay: network failures/process crashes can lose alerts, and concurrent deliveries may arrive out of order. Use trusted URLs; validation is not SSRF protection, private networks remain reachable, and payloads are unsigned.
+
+Scheduler failure logs contain service IDs and exception types, not exception messages or nested stack traces that could expose stored webhook credentials. Webhook delivery logs likewise omit URLs and exception text.
 
 ## Observability
 
